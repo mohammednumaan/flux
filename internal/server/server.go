@@ -1,16 +1,27 @@
 package server
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"strings"
+
+	requestTypes "github.com/mohammednumaan/flux/internal/types"
 )
 
-func homeHandler(port int) http.HandlerFunc {
+func requestHandler(port int) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		fmt.Fprintf(w, "received request from server running in port %d", port)
 	}
+}
+
+func startServer(port int, mux *http.ServeMux) {
+	mux.HandleFunc("/", requestHandler(port))
+	addr := fmt.Sprintf(":%d", port)
+
+	log.Printf("[server]: listening on port ::%d", port)
+	log.Fatal(http.ListenAndServe(addr, mux))
 }
 
 func Start() {
@@ -22,27 +33,33 @@ func Start() {
 	for i := 0; i < count; i++ {
 		serverPort := startPort + i
 		mux := http.NewServeMux()
-		mux.HandleFunc("/", homeHandler(serverPort))
+		go startServer(serverPort, mux)
 
-		go func(port int, handler http.Handler) {
-			addr := fmt.Sprintf(":%d", port)
-			log.Printf("listening on port ::%d", port)
-			log.Fatal(http.ListenAndServe(addr, handler))
-		}(serverPort, mux)
+		registerRequest := requestTypes.RegisterRequest{
+			Host: "localhost",
+			Port: serverPort,
+		}
+
+		jsonData, err := json.Marshal(registerRequest)
+		if err != nil {
+			log.Fatalf("failed to marshal register request for server on port %d: %v", serverPort, err)
+			panic(err)
+		}
 
 		resp, err := http.Post(
 			"http://localhost:8090/register",
 			"application/json",
-			strings.NewReader(fmt.Sprintf(`{"addr": "http://localhost:%d"}`, serverPort)),
+			bytes.NewBuffer(jsonData),
 		)
+
+		defer resp.Body.Close()
 
 		if err != nil {
 			log.Fatalf("failed to register server on port %d with balancer: %v", serverPort, err)
 			panic(err)
 		}
 
-		defer resp.Body.Close()
-		log.Prinf("server on port %d registered successfully with balancer", serverPort)
+		log.Printf("server on port %d registered with balancer, response status: %s", serverPort, resp.Status)
 	}
 
 }

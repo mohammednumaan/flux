@@ -3,20 +3,19 @@ package utils
 import (
 	"encoding/json"
 	"net/http"
-)
 
-type RegisterResponse struct {
-	Status  string `json:"status"`
-	Message string `json:"message"`
-}
+	requestTypes "github.com/mohammednumaan/flux/internal/types"
+)
 
 func SendRegisterHTTPResponse(w http.ResponseWriter, message string) {
 	encoder := json.NewEncoder(w)
-	err := encoder.Encode(RegisterResponse{
-		Status:  "success",
-		Message: message,
-	})
 
+	registerResponse := requestTypes.RegisterResponse{
+		Success: true,
+		Message: message,
+	}
+
+	err := encoder.Encode(registerResponse)
 	if err != nil {
 		http.Error(w, "failed to encode response", http.StatusInternalServerError)
 		return

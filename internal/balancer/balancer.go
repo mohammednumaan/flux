@@ -2,9 +2,12 @@ package balancer
 
 import (
 	"encoding/json"
-	"github.com/mohammednumaan/flux/internal/utils"
+	"fmt"
 	"log"
 	"net/http"
+
+	requestTypes "github.com/mohammednumaan/flux/internal/types"
+	"github.com/mohammednumaan/flux/internal/utils"
 )
 
 /*
@@ -14,7 +17,17 @@ this is just a very simple round-robin load balancer. so far it only supports:
 (forwarding is not implemented yet)
 */
 type Server struct {
-	Addr string `json:"addr"`
+	Host              string
+	Port              int
+	ServerUtilization float32
+
+	// the InFlightRequestCount is local to the balancer
+	// i.e number of in-flight reqs to this server from the balancer
+	InFlightRequestCount int
+
+	// i use a percentage because a raw count by itself
+	// ignores VOLUME of requests
+	RollingErrorRate float32
 }
 
 type BalancerState struct {
@@ -38,31 +51,39 @@ func (b *BalancerState) routeRequestHandler(w http.ResponseWriter, req *http.Req
 	server := b.cluster[serverIdx]
 	b.current++
 
-	log.Printf("forwarding request to server %s", server.Addr)
+	serverAddr := fmt.Sprintf("%s:%d", server.Host, server.Port)
+	log.Printf("forwarding request to server %s", serverAddr)
 	// here would be the logic to forward
 	// the request to the selected server, but for now i just log it
 }
 
 func (b *BalancerState) registerServer(w http.ResponseWriter, req *http.Request) {
-	var server Server
-	err := json.NewDecoder(req.Body).Decode(&server)
+	var registerRequest requestTypes.RegisterRequest
+	err := json.NewDecoder(req.Body).Decode(&registerRequest)
+
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	newServerAddr := fmt.Sprintf("%s:%d", registerRequest.Host, registerRequest.Port)
 	for _, s := range b.cluster {
-		if s.Addr == server.Addr {
-			log.Printf("server already registered %s", server.Addr)
+		currentServerAddr := fmt.Sprintf("%s:%d", s.Host, s.Port)
+		if currentServerAddr == newServerAddr {
 			utils.SendRegisterHTTPResponse(w, "server already registered")
 			return
 		}
 	}
 
-	b.cluster = append(b.cluster, &server)
-	log.Printf("server registered successfully %s", server.Addr)
+	newServer := Server{
+		Host:                 registerRequest.Host,
+		Port:                 registerRequest.Port,
+		ServerUtilization:    0.0,
+		InFlightRequestCount: 0,
+		RollingErrorRate:     0.0,
+	}
 
-	log.Printf("current cluster state: %+v", b.cluster)
+	b.cluster = append(b.cluster, &newServer)
 	utils.SendRegisterHTTPResponse(w, "server registered successfully")
 }
 
