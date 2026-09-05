@@ -1,0 +1,37 @@
+name: flux
+
+services:
+  consul-server:
+    image: hashicorp/consul:2.0.3
+    container_name: consul-server
+    restart: always
+    networks:
+      - flux-net
+    ports:
+      - "8500:8500"
+      - "8600:8600/tcp"
+      - "8600:8600/udp"
+    command: "agent -server -ui -client=0.0.0.0 -data-dir='/consul/data' -node=consul-server -bootstrap-expect=1"
+
+  server-1:
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile.flux-server
+    container_name: flux-server-1
+    restart: always
+    networks:
+      - flux-net
+    depends_on:
+      - consul-server 
+    ports:
+      - "8080:8080"
+    environment:
+      - CONSUL_HTTP_ADDR=consul-server:8500
+      - SERVICE_ID=flux-server-1
+      - SERVICE_HOST=flux-server
+      - SERVICE_Name=flux-backend
+
+networks:
+  flux-net:
+    driver: bridge
+

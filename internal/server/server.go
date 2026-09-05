@@ -1,14 +1,20 @@
 package server
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 
-	requestTypes "github.com/mohammednumaan/flux/internal/types"
+	capi "github.com/hashicorp/consul/api"
 )
+
+func getEnv(key, defaultValue string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultValue
+}
 
 func requestHandler(port int) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
@@ -16,50 +22,52 @@ func requestHandler(port int) http.HandlerFunc {
 	}
 }
 
-func startServer(port int, mux *http.ServeMux) {
-	mux.HandleFunc("/", requestHandler(port))
-	addr := fmt.Sprintf(":%d", port)
-
-	log.Printf("[server]: listening on port ::%d", port)
-	log.Fatal(http.ListenAndServe(addr, mux))
+func healthRequestHandler(w http.ResponseWriter, req *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
 }
 
 func Start() {
-	startPort := 8080
-	count := 3
 
-	// this just spins up 3 servers and registers each of them
-	// with the balancer at port 8090 via /register
-	for i := 0; i < count; i++ {
-		serverPort := startPort + i
-		mux := http.NewServeMux()
-		go startServer(serverPort, mux)
+	go func() {
+		log.Println("[server]: starting server on port 8080")
 
-		registerRequest := requestTypes.RegisterRequest{
-			Host: "localhost",
-			Port: serverPort,
-		}
+		http.HandleFunc("/", requestHandler(8080))
+		http.HandleFunc("/health", healthRequestHandler)
 
-		jsonData, err := json.Marshal(registerRequest)
+		err := http.ListenAndServe(":8080", nil)
 		if err != nil {
-			log.Fatalf("failed to marshal register request for server on port %d: %v", serverPort, err)
-			panic(err)
+			log.Fatal(err)
 		}
+	}()
 
-		resp, err := http.Post(
-			"http://localhost:8090/register",
-			"application/json",
-			bytes.NewBuffer(jsonData),
-		)
+	serviceID := getEnv("SERVICE_ID", "flux-server-1")
+	serviceName := getEnv("SERVICE_NAME", "flux-backend")
+	serviceHost := getEnv("SERVICE_HOST", "flux-server")
 
-		defer resp.Body.Close()
-
-		if err != nil {
-			log.Fatalf("failed to register server on port %d with balancer: %v", serverPort, err)
-			panic(err)
-		}
-
-		log.Printf("server on port %d registered with balancer, response status: %s", serverPort, resp.Status)
+	config := capi.DefaultConfig()
+	client, err := capi.NewClient(config)
+	if err != nil {
+		panic(err)
 	}
+
+	registration := &capi.AgentServiceRegistration{
+		ID:   serviceID,
+		Name: serviceName,
+		Port: 8080,
+		Check: &capi.AgentServiceCheck{
+			HTTP:                           fmt.Sprintf("http://%s:8080/health", serviceHost),
+			Interval:                       "10s",
+			Timeout:                        "5s",
+			DeregisterCriticalServiceAfter: "1m",
+		},
+	}
+
+	if err := client.Agent().ServiceRegister(registration); err != nil {
+		log.Fatalf("[%s] failed to register: %v", serviceID, err)
+		panic(err)
+	}
+
+	log.Printf("[%s] registered with consul successfully!", serviceID)
 
 }
