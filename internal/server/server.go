@@ -43,7 +43,7 @@ func Start() {
 
 	serviceID := getEnv("SERVICE_ID", "flux-server-1")
 	serviceName := getEnv("SERVICE_NAME", "flux-backend")
-	serviceHost := getEnv("SERVICE_HOST", "flux-server")
+	serviceHost := getEnv("SERVICE_HOST", "flux-server-1")
 
 	config := capi.DefaultConfig()
 	client, err := capi.NewClient(config)
@@ -69,5 +69,6 @@ func Start() {
 	}
 
 	log.Printf("[%s] registered with consul successfully!", serviceID)
+	select {}
 
 }

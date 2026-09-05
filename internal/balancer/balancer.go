@@ -1,13 +1,13 @@
 package balancer
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 
-	requestTypes "github.com/mohammednumaan/flux/internal/types"
-	"github.com/mohammednumaan/flux/internal/utils"
+	capi "github.com/hashicorp/consul/api"
+	"github.com/hashicorp/consul/api/watch"
 )
 
 /*
@@ -57,42 +57,58 @@ func (b *BalancerState) routeRequestHandler(w http.ResponseWriter, req *http.Req
 	// the request to the selected server, but for now i just log it
 }
 
-func (b *BalancerState) registerServer(w http.ResponseWriter, req *http.Request) {
-	var registerRequest requestTypes.RegisterRequest
-	err := json.NewDecoder(req.Body).Decode(&registerRequest)
-
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	newServerAddr := fmt.Sprintf("%s:%d", registerRequest.Host, registerRequest.Port)
-	for _, s := range b.cluster {
-		currentServerAddr := fmt.Sprintf("%s:%d", s.Host, s.Port)
-		if currentServerAddr == newServerAddr {
-			utils.SendRegisterHTTPResponse(w, "server already registered")
-			return
-		}
-	}
-
-	newServer := Server{
-		Host:                 registerRequest.Host,
-		Port:                 registerRequest.Port,
-		ServerUtilization:    0.0,
-		InFlightRequestCount: 0,
-		RollingErrorRate:     0.0,
-	}
-
-	b.cluster = append(b.cluster, &newServer)
-	utils.SendRegisterHTTPResponse(w, "server registered successfully")
-}
-
 func Start() {
 	balancer := createBalancer("http://localhost:8090")
 	log.Println("[balancer]: starting balancer at port :8090")
 
-	http.HandleFunc("/register", balancer.registerServer)
-	http.HandleFunc("/api", balancer.routeRequestHandler)
+	go func() {
+		http.HandleFunc("/api", balancer.routeRequestHandler)
+		log.Fatal(http.ListenAndServe(":8090", nil))
+	}()
 
-	log.Fatal(http.ListenAndServe(":8090", nil))
+	targetServiceName := os.Getenv("TARGET_SERVICE_NAME")
+	if targetServiceName == "" {
+		targetServiceName = "flux-backend"
+	}
+	watchConfig := map[string]interface{}{
+		"type":        "service",
+		"service":     targetServiceName,
+		"passingonly": true,
+	}
+
+	plan, err := watch.Parse(watchConfig)
+	if err != nil {
+		log.Fatalf("failed to create watch plan: %v", err)
+	}
+
+	plan.Handler = func(idx uint64, data interface{}) {
+		services, ok := data.([]*capi.ServiceEntry)
+		if !ok {
+			log.Println("failed to cast data to []*capi.ServiceEntry")
+			return
+		}
+
+		var activeServers []string
+		for _, service := range services {
+			addr := service.Service.Address
+			port := service.Service.Port
+			activeServers = append(activeServers, fmt.Sprintf("%s:%d", addr, port))
+		}
+
+		log.Printf("[balancer]: active servers for service %s: %v", targetServiceName, activeServers)
+	}
+
+	fmt.Println("[balancer]: starting consul watch for flux-backend service")
+
+	consulServerAddr := os.Getenv("CONSUL_HTTP_ADDR")
+	if consulServerAddr == "" {
+		consulServerAddr = "localhost:8500"
+	}
+
+	if err := plan.Run(consulServerAddr); err != nil {
+		log.Fatalf("failed to run watch plan: %v", err)
+	}
+
+	select {}
+
 }

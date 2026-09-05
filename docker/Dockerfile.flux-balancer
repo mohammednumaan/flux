@@ -1,0 +1,14 @@
+FROM golang:1.26.2 AS build
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN  CGO_ENABLED=0 GOOS=linux go build -o /out/flux-balancer ./cmd/balancer.go
+
+FROM gcr.io/distroless/static-debian12
+
+COPY --from=build /out/flux-balancer /flux-balancer
+ENTRYPOINT ["/flux-balancer"]
+

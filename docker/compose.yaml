@@ -12,6 +12,32 @@ services:
       - "8600:8600/tcp"
       - "8600:8600/udp"
     command: "agent -server -ui -client=0.0.0.0 -data-dir='/consul/data' -node=consul-server -bootstrap-expect=1"
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8500/v1/status/leader"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  balancer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.flux-balancer
+    container_name: flux-balancer
+    restart: always
+    networks:
+      - flux-net
+    depends_on:
+      consul-server:
+        condition: service_healthy
+      server-1:
+        condition: service_started
+    ports:
+      - "8090:8090"
+    environment:
+      - CONSUL_HTTP_ADDR=consul-server:8500
+      - SERVICE_NAME=flux-balancer
+      - TARGET_SERVICE_NAME=flux-backend
 
   server-1:
     build: 
@@ -28,7 +54,7 @@ services:
     environment:
       - CONSUL_HTTP_ADDR=consul-server:8500
       - SERVICE_ID=flux-server-1
-      - SERVICE_HOST=flux-server
+      - SERVICE_HOST=flux-server-1
       - SERVICE_Name=flux-backend
 
 networks:
