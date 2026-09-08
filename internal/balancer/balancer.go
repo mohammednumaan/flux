@@ -36,11 +36,62 @@ type BalancerState struct {
 	current int
 }
 
+func createServer(host string, port int) *Server {
+	return &Server{
+		Host:                 host,
+		Port:                 port,
+		ServerUtilization:    0.0,
+		InFlightRequestCount: 0,
+		RollingErrorRate:     0.0,
+	}
+}
+
 func createBalancer(addr string) *BalancerState {
 	return &BalancerState{
 		addr:    addr,
 		cluster: make([]*Server, 0),
 		current: 0,
+	}
+}
+
+func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamVal, data interface{}) {
+	return func(blockParam watch.BlockingParamVal, data interface{}) {
+		if data == nil {
+			log.Println("[balancer]: no data received from consul watch")
+			return
+		}
+
+		services, ok := data.([]*capi.ServiceEntry)
+		if !ok {
+			log.Println("[balancer]: failed to cast data to []*capi.ServiceEntry")
+			return
+		}
+
+		newCluster := make([]*Server, 0)
+		for _, entry := range services {
+			status := "passing"
+			for _, check := range entry.Checks {
+				if check.Status != capi.HealthPassing {
+					status = "unhealthy"
+					break
+				}
+			}
+
+			if status == "passing" {
+				log.Printf("[balancer]: service %s is healthy", entry.Service.Service)
+				server := createServer(entry.Service.Address, entry.Service.Port)
+				newCluster = append(newCluster, server)
+			} else {
+				log.Printf("[balancer]: service %s is unhealthy", entry.Service.Service)
+
+			}
+		}
+
+		b.cluster = newCluster
+		for _, server := range b.cluster {
+			log.Printf("[balancer]: registered server %s:%d", server.Host, server.Port)
+		}
+
 	}
 }
 
@@ -79,25 +130,10 @@ func Start() {
 	plan, err := watch.Parse(watchConfig)
 	if err != nil {
 		log.Fatalf("failed to create watch plan: %v", err)
+		panic(err)
 	}
 
-	plan.Handler = func(idx uint64, data interface{}) {
-		services, ok := data.([]*capi.ServiceEntry)
-		if !ok {
-			log.Println("failed to cast data to []*capi.ServiceEntry")
-			return
-		}
-
-		var activeServers []string
-		for _, service := range services {
-			addr := service.Service.Address
-			port := service.Service.Port
-			activeServers = append(activeServers, fmt.Sprintf("%s:%d", addr, port))
-		}
-
-		log.Printf("[balancer]: active servers for service %s: %v", targetServiceName, activeServers)
-	}
-
+	plan.HybridHandler = balancerWatchHandler(balancer)
 	fmt.Println("[balancer]: starting consul watch for flux-backend service")
 
 	consulServerAddr := os.Getenv("CONSUL_HTTP_ADDR")

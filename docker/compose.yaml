@@ -32,6 +32,8 @@ services:
         condition: service_healthy
       server-1:
         condition: service_started
+      server-2:
+        condition: service_started
     ports:
       - "8090:8090"
     environment:
@@ -56,6 +58,26 @@ services:
       - SERVICE_ID=flux-server-1
       - SERVICE_HOST=flux-server-1
       - SERVICE_Name=flux-backend
+      - SERVICE_PORT=8080
+
+  server-2:
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile.flux-server
+    container_name: flux-server-2
+    restart: always
+    networks:
+      - flux-net
+    depends_on:
+      - consul-server 
+    ports:
+      - "8081:8081"
+    environment:
+      - CONSUL_HTTP_ADDR=consul-server:8500
+      - SERVICE_ID=flux-server-2
+      - SERVICE_HOST=flux-server-2
+      - SERVICE_Name=flux-backend
+      - SERVICE_PORT=8081
 
 networks:
   flux-net:
