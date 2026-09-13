@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 
 	capi "github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/api/watch"
+	"github.com/mohammednumaan/flux/internal/utils"
 )
 
 /*
@@ -31,7 +31,8 @@ type Server struct {
 }
 
 type BalancerState struct {
-	addr    string
+	host    string
+	port    int
 	cluster []*Server
 	current int
 }
@@ -46,9 +47,10 @@ func createServer(host string, port int) *Server {
 	}
 }
 
-func createBalancer(addr string) *BalancerState {
+func createBalancer(host string, port int) *BalancerState {
 	return &BalancerState{
-		addr:    addr,
+		host:    host,
+		port:    port,
 		cluster: make([]*Server, 0),
 		current: 0,
 	}
@@ -63,7 +65,7 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 
 		services, ok := data.([]*capi.ServiceEntry)
 		if !ok {
-			log.Println("[balancer]: failed to cast data to []*capi.ServiceEntry")
+			log.Fatalf("[balancer]: failed to cast data to []*capi.ServiceEntry")
 			return
 		}
 
@@ -78,7 +80,7 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 			}
 
 			if status == "passing" {
-				log.Printf("[balancer]: service %s is healthy", entry.Service.Service)
+				log.Printf("[balancer]: service with address %s:%d is healthy", entry.Service.Address, entry.Service.Port)
 				server := createServer(entry.Service.Address, entry.Service.Port)
 				newCluster = append(newCluster, server)
 			} else {
@@ -109,40 +111,31 @@ func (b *BalancerState) routeRequestHandler(w http.ResponseWriter, req *http.Req
 }
 
 func Start() {
-	balancer := createBalancer("http://localhost:8090")
-	log.Println("[balancer]: starting balancer at port :8090")
+	balancerEnv := utils.GetBalancerEnv()
+	balancer := createBalancer(balancerEnv.ServiceHost, balancerEnv.ServicePort)
 
 	go func() {
 		http.HandleFunc("/api", balancer.routeRequestHandler)
-		log.Fatal(http.ListenAndServe(":8090", nil))
+		log.Printf("[balancer]: starting balancer at port :%d", balancerEnv.ServicePort)
+		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", balancerEnv.ServicePort), nil))
 	}()
 
-	targetServiceName := os.Getenv("TARGET_SERVICE_NAME")
-	if targetServiceName == "" {
-		targetServiceName = "flux-backend"
-	}
 	watchConfig := map[string]interface{}{
 		"type":        "service",
-		"service":     targetServiceName,
+		"service":     balancerEnv.TargetServiceName,
 		"passingonly": true,
 	}
 
 	plan, err := watch.Parse(watchConfig)
 	if err != nil {
-		log.Fatalf("failed to create watch plan: %v", err)
-		panic(err)
+		log.Fatalf("[balancer]: failed to create watch plan in consul: %v", err)
 	}
 
 	plan.HybridHandler = balancerWatchHandler(balancer)
 	fmt.Println("[balancer]: starting consul watch for flux-backend service")
 
-	consulServerAddr := os.Getenv("CONSUL_HTTP_ADDR")
-	if consulServerAddr == "" {
-		consulServerAddr = "localhost:8500"
-	}
-
-	if err := plan.Run(consulServerAddr); err != nil {
-		log.Fatalf("failed to run watch plan: %v", err)
+	if err := plan.Run(balancerEnv.ConsulHttpAddr); err != nil {
+		log.Fatalf("[balancer]: failed to run watch plan in consul: %v", err)
 	}
 
 	select {}

@@ -39,6 +39,8 @@ services:
     environment:
       - CONSUL_HTTP_ADDR=consul-server:8500
       - SERVICE_NAME=flux-balancer
+      - SERVICE_HOST=flux-balancer
+      - SERVICE_PORT=8090
       - TARGET_SERVICE_NAME=flux-backend
 
   server-1:
