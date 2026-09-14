@@ -98,20 +98,35 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 }
 
 func (b *BalancerState) routeRequestHandler(w http.ResponseWriter, req *http.Request) {
-	log.Printf("received request from %s", req.RemoteAddr)
-	serverIdx := b.current % len(b.cluster)
+	log.Printf("[balancer]: received request %s from %s", req.URL.Path, req.RemoteAddr)
 
-	server := b.cluster[serverIdx]
+	if len(b.cluster) == 0 {
+		log.Printf("[balancer]: no servers available to handle request %s from %s", req.URL.Path, req.RemoteAddr)
+		http.Error(w, "No servers available", http.StatusServiceUnavailable)
+		return
+	}
+
+	serverIdx := b.current % len(b.cluster)
+	selectedServer := b.cluster[serverIdx]
 	b.current++
 
-	serverAddr := fmt.Sprintf("%s:%d", server.Host, server.Port)
-	log.Printf("forwarding request to server %s", serverAddr)
-	// here would be the logic to forward
-	// the request to the selected server, but for now i just log it
+	remoteURL := fmt.Sprintf("http://%s:%d%s", selectedServer.Host, selectedServer.Port, req.URL.Path)
+	err := utils.ForwardRequest(remoteURL, w, req)
+
+	if err != nil {
+		log.Printf("[balancer]: failed to forward request %s from %s to server %s:%d: %v", req.URL.Path, req.RemoteAddr, selectedServer.Host, selectedServer.Port, err)
+		http.Error(w, "Failed to forward request", http.StatusInternalServerError)
+		return
+	}
+
 }
 
 func Start() {
-	balancerEnv := utils.GetBalancerEnv()
+	balancerEnv, err := utils.GetBalancerEnv()
+	if err != nil {
+		log.Fatalf("[balancer]: failed to get balancer env: %v", err)
+	}
+
 	balancer := createBalancer(balancerEnv.ServiceHost, balancerEnv.ServicePort)
 
 	go func() {

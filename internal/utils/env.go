@@ -15,31 +15,30 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
-func GetServerEnv() types.ServerEnv {
+// i don't really care about using proper alternate values for the env vars
+// because once i move to k8's, the env vars will be set by the k8s deployment
+func GetServerEnv() (*types.ServerEnv, error) {
 	consulHttpAddr := getEnv("CONSUL_HTTP_ADDR", "http://localhost:8500")
 	serviceID := getEnv("SERVICE_ID", "flux-server-1")
 	serviceName := getEnv("SERVICE_NAME", "flux-backend")
 	serviceHost := getEnv("SERVICE_HOST", "flux-server-1")
 	servicePort := getEnv("SERVICE_PORT", "8080")
 
-	// this is something pretty cool i learnt
-	// we can use := to re-assign the same variable (here servicePort)
-	// as long as we introduce a new variable (here err)
 	servicePortInt, err := strconv.Atoi(servicePort)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
-	return types.ServerEnv{
+	return &types.ServerEnv{
 		ConsulHttpAddr: consulHttpAddr,
 		ServiceID:      serviceID,
 		ServiceName:    serviceName,
 		ServiceHost:    serviceHost,
 		ServicePort:    servicePortInt,
-	}
+	}, nil
 }
 
-func GetBalancerEnv() types.BalancerEnv {
+func GetBalancerEnv() (*types.BalancerEnv, error) {
 	consulHttpAddr := getEnv("CONSUL_HTTP_ADDR", "http://localhost:8500")
 	serviceName := getEnv("SERVICE_NAME", "flux-backend")
 	serviceHost := getEnv("SERVICE_HOST", "localhost")
@@ -48,14 +47,14 @@ func GetBalancerEnv() types.BalancerEnv {
 
 	servicePortInt, err := strconv.Atoi(servicePort)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
-	return types.BalancerEnv{
+	return &types.BalancerEnv{
 		ConsulHttpAddr:    consulHttpAddr,
 		ServiceName:       serviceName,
 		ServiceHost:       serviceHost,
 		ServicePort:       servicePortInt,
 		TargetServiceName: targetServiceName,
-	}
+	}, nil
 }
