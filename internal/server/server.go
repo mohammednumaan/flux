@@ -4,13 +4,29 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	capi "github.com/hashicorp/consul/api"
 	"github.com/mohammednumaan/flux/internal/utils"
 )
 
+type Server struct {
+	Host              string
+	Port              int
+	ServerUtilization float32
+
+	// the InFlightRequestCount is local to the balancer
+	// i.e number of in-flight reqs to this server from the balancer
+	InFlightRequestCount int64
+
+	// i use a percentage because a raw count by itself
+	// ignores VOLUME of requests
+	RollingErrorRate float32
+}
+
 func requestHandler(serviceName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
+		time.Sleep(2 * time.Second)
 		log.Printf("[server]: received request from %s", req.RemoteAddr)
 		fmt.Fprintf(w, "hello from %s!", serviceName)
 	}
