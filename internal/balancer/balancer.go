@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand/v2"
 	"net/http"
+	"sync"
 
 	capi "github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/api/watch"
@@ -17,14 +18,47 @@ type BalancerState struct {
 	port    int
 	cluster []*server.Server
 	current int
+	mu      sync.Mutex
 }
 
-/*
-this is just a very simple round-robin load balancer. so far it only supports:
-1. registering servers to the balancer
-2. routing requests to the registered servers in a round-robin fashion
-(forwarding is not implemented yet)
-*/
+func (b *BalancerState) pickServer() *server.Server {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	n := len(b.cluster)
+	if n == 0 {
+		return nil
+	}
+	selected := b.cluster[0]
+	if n >= 2 {
+		candidates := rand.Perm(n)[:2]
+		candidate1 := b.cluster[candidates[0]]
+		candidate2 := b.cluster[candidates[1]]
+
+		if candidate1.InFlightRequestCount < candidate2.InFlightRequestCount {
+			selected = candidate1
+		} else {
+			selected = candidate2
+		}
+	}
+
+	selected.InFlightRequestCount++
+	return selected
+}
+
+func (b *BalancerState) releaseServer(srv *server.Server) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if srv.InFlightRequestCount > 0 {
+		srv.InFlightRequestCount--
+	}
+}
+
+func (b *BalancerState) UpdateServerUtilization(srv *server.Server, utilization float64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	srv.ServerUtilization = utilization
+}
 
 func createServer(host string, port int) *server.Server {
 	return &server.Server{
@@ -58,27 +92,42 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 			return
 		}
 
+		b.mu.Lock()
+		existing := make(map[string]*server.Server)
+		for _, srv := range b.cluster {
+			hostPort := fmt.Sprintf("%s:%d", srv.Host, srv.Port)
+			existing[hostPort] = srv
+		}
+
+		b.mu.Unlock()
 		newCluster := make([]*server.Server, 0)
 		for _, entry := range services {
-			status := "passing"
+			healthy := true
 			for _, check := range entry.Checks {
 				if check.Status != capi.HealthPassing {
-					status = "unhealthy"
+					healthy = false
 					break
 				}
 			}
 
-			if status == "passing" {
-				log.Printf("[balancer]: service with address %s:%d is healthy", entry.Service.Address, entry.Service.Port)
-				server := createServer(entry.Service.Address, entry.Service.Port)
-				newCluster = append(newCluster, server)
-			} else {
-				log.Printf("[balancer]: service %s is unhealthy", entry.Service.Service)
-
+			if !healthy {
+				log.Printf("[balancer]: server %s:%d is not healthy, skipping", entry.Service.Address, entry.Service.Port)
+				continue
 			}
+
+			hostPort := fmt.Sprintf("%s:%d", entry.Service.Address, entry.Service.Port)
+			srv, exists := existing[hostPort]
+			if !exists {
+				srv = createServer(entry.Service.Address, entry.Service.Port)
+			}
+
+			newCluster = append(newCluster, srv)
 		}
 
+		b.mu.Lock()
 		b.cluster = newCluster
+		b.mu.Unlock()
+
 		for _, server := range b.cluster {
 			log.Printf("[balancer]: registered server %s:%d", server.Host, server.Port)
 		}
@@ -87,43 +136,16 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 }
 
 func (b *BalancerState) routeRequestHandler(w http.ResponseWriter, req *http.Request) {
-	// log.Printf("[balancer]: received request %s from %s", req.URL.Path, req.RemoteAddr)
-
-	if len(b.cluster) == 0 {
-		// log.Printf("[balancer]: no servers available to handle request %s from %s", req.URL.Path, req.RemoteAddr)
-		http.Error(w, "No servers available", http.StatusServiceUnavailable)
+	selected := b.pickServer()
+	if selected == nil {
+		http.Error(w, "No available servers", http.StatusServiceUnavailable)
 		return
 	}
 
-	// choice of 2 algorithm. here, i select two servers at random
-	// and pick one using various factors such as utilization, in-flight requests
-	// and rolling error rate.
-	n := len(b.cluster)
-	// for _, server := range b.cluster {
-	// 	log.Printf("[balancer]: server %s:%d has %d in-flight requests", server.Host, server.Port, server.InFlightRequestCount)
-	// }
-
-	var serverIdx int
-	if n >= 2 {
-		// this generates 2 random numbers which are unique
-		// from 0 to n, where n is the number of servers in the cluster
-		candidates := rand.Perm(n)[:2]
-		candidate1 := b.cluster[candidates[0]]
-		candidate2 := b.cluster[candidates[1]]
-
-		// i am only focusing on in-flight requests for now
-		if candidate1.InFlightRequestCount < candidate2.InFlightRequestCount {
-			serverIdx = candidates[0]
-		} else {
-			serverIdx = candidates[1]
-		}
-
-	}
-
-	selectedServer := b.cluster[serverIdx]
-	err := ForwardRequest(selectedServer, w, req)
+	defer b.releaseServer(selected)
+	err := ForwardRequest(b, selected, w, req)
 	if err != nil {
-		// log.Printf("[balancer]: failed to forward request %s from %s to server %s:%d: %v", req.URL.Path, req.RemoteAddr, selectedServer.Host, selectedServer.Port, err)
+		log.Printf("[balancer]: failed to forward request to server %s:%d: %v", selected.Host, selected.Port, err)
 		http.Error(w, "Failed to forward request", http.StatusInternalServerError)
 		return
 	}

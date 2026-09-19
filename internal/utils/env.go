@@ -23,19 +23,27 @@ func GetServerEnv() (*types.ServerEnv, error) {
 	serviceName := getEnv("SERVICE_NAME", "flux-backend")
 	serviceHost := getEnv("SERVICE_HOST", "flux-server-1")
 	servicePort := getEnv("SERVICE_PORT", "8080")
+	maxConfgiuredReqCount := getEnv("MAX_CONFIGURED_REQUEST_COUNT", "100")
 
 	servicePortInt, err := strconv.Atoi(servicePort)
 	if err != nil {
 		return nil, err
 	}
 
+	maxConfgiuredReqCountInt, err := strconv.ParseInt(maxConfgiuredReqCount, 10, 64)
+	if err != nil {
+		return nil, err
+	}
+
 	return &types.ServerEnv{
-		ConsulHttpAddr: consulHttpAddr,
-		ServiceID:      serviceID,
-		ServiceName:    serviceName,
-		ServiceHost:    serviceHost,
-		ServicePort:    servicePortInt,
+		ConsulHttpAddr:            consulHttpAddr,
+		ServiceID:                 serviceID,
+		ServiceName:               serviceName,
+		ServiceHost:               serviceHost,
+		ServicePort:               servicePortInt,
+		MaxConfiguredRequestCount: maxConfgiuredReqCountInt,
 	}, nil
+
 }
 
 func GetBalancerEnv() (*types.BalancerEnv, error) {

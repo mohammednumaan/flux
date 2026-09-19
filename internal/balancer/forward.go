@@ -3,14 +3,16 @@ package balancer
 import (
 	"fmt"
 	"io"
-	// "log"
+	"log"
 	"net/http"
-	"sync/atomic"
+	"strconv"
 
 	"github.com/mohammednumaan/flux/internal/server"
 )
 
-func ForwardRequest(s *server.Server, w http.ResponseWriter, r *http.Request) error {
+const utilizationHeader = "X-Flux-Server-Utilization"
+
+func ForwardRequest(b *BalancerState, s *server.Server, w http.ResponseWriter, r *http.Request) error {
 
 	remoteURL := fmt.Sprintf("http://%s:%d%s", s.Host, s.Port, r.URL.Path)
 	req, err := http.NewRequest(r.Method, remoteURL, r.Body)
@@ -19,15 +21,20 @@ func ForwardRequest(s *server.Server, w http.ResponseWriter, r *http.Request) er
 	}
 
 	req.Header = r.Header.Clone()
-	atomic.AddInt64(&s.InFlightRequestCount, 1)
-	defer atomic.AddInt64(&s.InFlightRequestCount, -1)
-
 	resp, err := http.DefaultClient.Do(req)
+
 	if err != nil {
 		return err
 	}
-
 	defer resp.Body.Close()
+
+	if utilHeader := resp.Header.Get(utilizationHeader); utilHeader != "" {
+		if u, err := strconv.ParseFloat(utilHeader, 64); err == nil {
+			b.UpdateServerUtilization(s, u)
+		}
+	}
+
+	resp.Header.Del(utilizationHeader)
 
 	for key, values := range resp.Header {
 		for _, value := range values {
@@ -36,11 +43,11 @@ func ForwardRequest(s *server.Server, w http.ResponseWriter, r *http.Request) er
 	}
 
 	w.WriteHeader(resp.StatusCode)
-	_, writeErr := io.Copy(w, resp.Body)
-	if writeErr != nil {
-		return writeErr
+	written, err := io.Copy(w, resp.Body)
+	if err != nil {
+		return err
 	}
-	// log.Printf("[forward]: forwarded request to %s, response status: %d, bytes written: %d", remoteURL, resp.StatusCode, written)
+	log.Printf("[forward]: forwarded request to %s, response status: %d, bytes written: %d", remoteURL, resp.StatusCode, written)
 
 	return nil
 }
