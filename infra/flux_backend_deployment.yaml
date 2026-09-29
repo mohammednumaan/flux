@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flux-backend
+  namespace: flux
+  labels:
+    app: flux-backend
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: flux-backend
+  template:
+    metadata:
+      labels:
+        app: flux-backend
+    spec:
+      containers:
+        - name: flux-backend-container
+          image: flux-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SERVICE_NAME
+              value: "flux-backend"
+            - name: SERVICE_PORT
+              value: "8080"
+            - name: SERVICE_ID
+              valueFrom:
+                fieldRef: { fieldPath: metadata.name }
+            - name: SERVICE_HOST
+              valueFrom:
+                fieldRef: { fieldPath: status.podIP }
+            - name: CONSUL_HTTP_ADDR
+              value: "http://consul-server:8500"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
