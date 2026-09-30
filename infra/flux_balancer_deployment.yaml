@@ -48,6 +48,9 @@ kind: Service
 metadata:
   name: flux-balancer
   namespace: flux
+  labels:
+    app: flux-balancer
+    job: balancer
 spec:
   selector:
     app: flux-balancer

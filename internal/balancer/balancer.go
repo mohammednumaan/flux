@@ -11,6 +11,19 @@ import (
 	"github.com/hashicorp/consul/api/watch"
 	"github.com/mohammednumaan/flux/internal/server"
 	"github.com/mohammednumaan/flux/internal/utils"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var metricsRegistry = prometheus.NewRegistry()
+var requestsTotal = promauto.With(metricsRegistry).NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "balancer_requests_total",
+		Help: "Total number of requests routed by the balancer",
+	},
+	[]string{"backend"},
 )
 
 type BalancerState struct {
@@ -143,6 +156,9 @@ func (b *BalancerState) routeRequestHandler(w http.ResponseWriter, req *http.Req
 	}
 
 	defer b.releaseServer(selected)
+
+	backend := fmt.Sprintf("%s:%d", selected.Host, selected.Port)
+	requestsTotal.WithLabelValues(backend).Inc()
 	err := ForwardRequest(b, selected, w, req)
 	if err != nil {
 		log.Printf("[balancer]: failed to forward request to server %s:%d: %v", selected.Host, selected.Port, err)
@@ -162,6 +178,14 @@ func Start() {
 
 	go func() {
 		http.HandleFunc("/api", balancer.routeRequestHandler)
+
+		http.Handle(
+			"/metrics",
+			promhttp.HandlerFor(
+				metricsRegistry,
+				promhttp.HandlerOpts{},
+			),
+		)
 		log.Printf("[balancer]: starting balancer at port :%d", balancerEnv.ServicePort)
 		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", balancerEnv.ServicePort), nil))
 	}()
