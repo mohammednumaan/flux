@@ -17,11 +17,31 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+const (
+	inFlightWeight   = 0.6
+	serverUtilWeight = 0.4
+)
+
 var metricsRegistry = prometheus.NewRegistry()
 var requestsTotal = promauto.With(metricsRegistry).NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "balancer_requests_total",
 		Help: "Total number of requests routed by the balancer",
+	},
+	[]string{"backend"},
+)
+var serverInFlight = promauto.With(metricsRegistry).NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "balancer_server_inflight_requests",
+		Help: "Number of in-flight requests to each backend server",
+	},
+	[]string{"backend"},
+)
+
+var serverUtilization = promauto.With(metricsRegistry).NewGaugeVec(
+	prometheus.GaugeOpts{
+		Name: "balancer_server_utilization",
+		Help: "Utilization of each backend server",
 	},
 	[]string{"backend"},
 )
@@ -42,13 +62,24 @@ func (b *BalancerState) pickServer() *server.Server {
 	if n == 0 {
 		return nil
 	}
+
+	maxInflight := int64(0)
+	for _, srv := range b.cluster {
+		if srv.InFlightRequestCount > maxInflight {
+			maxInflight = srv.InFlightRequestCount
+		}
+	}
+
 	selected := b.cluster[0]
 	if n >= 2 {
 		candidates := rand.Perm(n)[:2]
 		candidate1 := b.cluster[candidates[0]]
 		candidate2 := b.cluster[candidates[1]]
 
-		if candidate1.InFlightRequestCount < candidate2.InFlightRequestCount {
+		score1 := b.scoreServer(candidate1, maxInflight)
+		score2 := b.scoreServer(candidate2, maxInflight)
+
+		if score1 < score2 {
 			selected = candidate1
 		} else {
 			selected = candidate2
@@ -56,7 +87,35 @@ func (b *BalancerState) pickServer() *server.Server {
 	}
 
 	selected.InFlightRequestCount++
+	backend := fmt.Sprintf("%s:%d", selected.Host, selected.Port)
+	serverInFlight.WithLabelValues(backend).Set(float64(selected.InFlightRequestCount))
 	return selected
+}
+
+func clamp(val, min, max float64) float64 {
+	if val < min {
+		return min
+	}
+
+	if val > max {
+		return max
+	}
+
+	return val
+}
+
+func (b *BalancerState) scoreServer(srv *server.Server, maxInFlight int64) float64 {
+
+	// so my idea is to use a simple weighted scoring
+	// to compute scores for each candidate server
+	var normalizedInflight float64
+	if maxInFlight > 0 {
+		normalizedInflight = float64(srv.InFlightRequestCount) / float64(maxInFlight)
+	}
+
+	normalizedUtilization := clamp(srv.ServerUtilization, 0, 100) / 100
+	return (inFlightWeight * normalizedInflight) + (serverUtilWeight * normalizedUtilization)
+
 }
 
 func (b *BalancerState) releaseServer(srv *server.Server) {
@@ -65,12 +124,18 @@ func (b *BalancerState) releaseServer(srv *server.Server) {
 	if srv.InFlightRequestCount > 0 {
 		srv.InFlightRequestCount--
 	}
+
+	backend := fmt.Sprintf("%s:%d", srv.Host, srv.Port)
+	serverInFlight.WithLabelValues(backend).Set(float64(srv.InFlightRequestCount))
 }
 
 func (b *BalancerState) UpdateServerUtilization(srv *server.Server, utilization float64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	srv.ServerUtilization = utilization
+
+	backend := fmt.Sprintf("%s:%d", srv.Host, srv.Port)
+	serverUtilization.WithLabelValues(backend).Set(utilization)
 }
 
 func createServer(host string, port int) *server.Server {
