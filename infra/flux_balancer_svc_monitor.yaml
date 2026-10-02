@@ -2,14 +2,15 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: flux-balancer-svc-monitor
+  namespace: default
   labels:
-    release: prometheus
+    release: prometheus-stack
     app: prometheus
 spec:
   jobLabel: job
   endpoints:
     - port: http 
-      interval: 15s
+      interval: 1s
       path: /metrics
   namespaceSelector:
     matchNames:

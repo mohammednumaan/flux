@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	capi "github.com/hashicorp/consul/api"
 	"github.com/mohammednumaan/flux/internal/utils"
@@ -38,6 +39,7 @@ type ServerState struct {
 func requestHandler(serviceName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		log.Printf("[server]: received request from %s", req.RemoteAddr)
+		time.Sleep(5 * time.Second)
 		fmt.Fprintf(w, "hello from %s!", serviceName)
 	}
 }

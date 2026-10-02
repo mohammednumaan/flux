@@ -34,6 +34,8 @@ spec:
                 fieldRef: { fieldPath: status.podIP }
             - name: CONSUL_HTTP_ADDR
               value: "http://consul-server:8500"
+            - name: MAX_CONFIGURED_REQUEST_COUNT
+              value: "300"
           livenessProbe:
             httpGet:
               path: /health
