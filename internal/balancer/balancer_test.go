@@ -34,6 +34,54 @@ func TestRouteRequestWithNoServers(t *testing.T) {
 	}
 }
 
+func TestGroupFromTags(t *testing.T) {
+	tests := []struct {
+		name string
+		tags []string
+		want string
+	}{
+		{
+			name: "returns the backend group tag",
+			tags: []string{"version=v1", "flux-backend-group=constrained"},
+			want: "constrained",
+		},
+		{
+			name: "returns unknown when the backend group tag is absent",
+			tags: []string{"version=v1"},
+			want: "unknown",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := groupFromTags(tt.tags); got != tt.want {
+				t.Fatalf("groupFromTags(%v) = %q, want %q", tt.tags, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScoreServerFavorsLowerServerUtilization(t *testing.T) {
+	balancer := createBalancer("localhost", 8090)
+	normal := &server.Server{
+		InFlightRequestCount:      12,
+		MaxConfiguredRequestCount: 100,
+		ServerUtilization:         4,
+	}
+	constrained := &server.Server{
+		InFlightRequestCount:      9,
+		MaxConfiguredRequestCount: 100,
+		ServerUtilization:         31,
+	}
+
+	normalScore := balancer.scoreServer(normal)
+	constrainedScore := balancer.scoreServer(constrained)
+
+	if normalScore >= constrainedScore {
+		t.Fatalf("normal score %f should be lower than constrained score %f", normalScore, constrainedScore)
+	}
+}
+
 func TestRouteRequestWithServers(t *testing.T) {
 	const numServers = 3
 	const numRequests = 100

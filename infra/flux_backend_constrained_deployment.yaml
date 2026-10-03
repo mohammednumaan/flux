@@ -1,22 +1,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: flux-backend
+  name: flux-backend-constrained
   namespace: flux
   labels:
     app: flux-backend
-    experiment-group: normal
+    experiment-group: constrained
 spec:
   replicas: 5
   selector:
     matchLabels:
       app: flux-backend
-      experiment-group: normal
+      experiment-group: constrained
   template:
     metadata:
       labels:
         app: flux-backend
-        experiment-group: normal
+        experiment-group: constrained
     spec:
       containers:
         - name: flux-backend-container
@@ -38,9 +38,9 @@ spec:
             - name: CONSUL_HTTP_ADDR
               value: "http://consul-server:8500"
             - name: MAX_CONFIGURED_REQUEST_COUNT
-              value: "300"
+              value: "30"
             - name: BACKEND_GROUP
-              value: "normal"
+              value: "constrained"
           livenessProbe:
             httpGet:
               path: /health

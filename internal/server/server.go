@@ -20,11 +20,16 @@ ServerState is used to represent the server utilization state that the server it
 type Server struct {
 	Host              string
 	Port              int
+	BackendGroup      string
 	ServerUtilization float64
 
 	// the InFlightRequestCount is local to the balancer
 	// i.e number of in-flight reqs to this server from the balancer
 	InFlightRequestCount int64
+
+	// absolute capacity of this backend (max configured concurrent requests).
+	// used for capacity-based normalization: InFlightRequestCount / MaxConfiguredRequestCount.
+	MaxConfiguredRequestCount int64
 
 	// i use a percentage because a raw count by itself
 	// ignores VOLUME of requests
@@ -85,7 +90,7 @@ func Start() {
 		mux.HandleFunc("/health", healthRequestHandler)
 
 		handler := withUtilization("X-Flux-Server-Utilization", serverState, mux)
-		log.Printf("[server]: starting server on port %s", serverEnv.ServicePort)
+		log.Printf("[server]: starting server on port %d", serverEnv.ServicePort)
 
 		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", serverEnv.ServicePort), handler))
 	}()
@@ -101,6 +106,10 @@ func Start() {
 		Address: serverEnv.ServiceHost,
 		Name:    serverEnv.ServiceName,
 		Port:    serverEnv.ServicePort,
+		Tags: []string{
+			"flux-backend-group=" + serverEnv.BackendGroup,
+			"flux-max-requests=" + strconv.FormatInt(serverEnv.MaxConfiguredRequestCount, 10),
+		},
 		Check: &capi.AgentServiceCheck{
 			HTTP:                           fmt.Sprintf("http://%s:%d/health", serverEnv.ServiceHost, serverEnv.ServicePort),
 			Interval:                       "10s",
@@ -113,7 +122,7 @@ func Start() {
 		log.Fatalf("[%s] failed to register with consul server agent: %v", serverEnv.ServiceID, err)
 	}
 
-	log.Printf("[%s] registered with consul server agent successfully!", serverEnv.ServiceID)
+	log.Printf("[%s] registered with consul server agent successfully in group %q!", serverEnv.ServiceID, serverEnv.BackendGroup)
 	select {}
 
 }

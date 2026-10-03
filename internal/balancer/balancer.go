@@ -5,6 +5,8 @@ import (
 	"log"
 	"math/rand/v2"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 
 	capi "github.com/hashicorp/consul/api"
@@ -18,8 +20,13 @@ import (
 )
 
 const (
-	inFlightWeight   = 0.6
-	serverUtilWeight = 0.4
+	backendGroupTag               = "flux-backend-group="
+	backendMaxRequestsTag         = "flux-max-requests="
+	inFlightRequestCountWeight    = 0.5
+	serverUtilizationWeight       = 0.4
+	rollingErrorRateWeight        = 0.1
+	maxServerUtilizationThreshold = 85.0
+	filterMaxAttempts             = 5
 )
 
 var metricsRegistry = prometheus.NewRegistry()
@@ -28,14 +35,14 @@ var requestsTotal = promauto.With(metricsRegistry).NewCounterVec(
 		Name: "balancer_requests_total",
 		Help: "Total number of requests routed by the balancer",
 	},
-	[]string{"backend"},
+	[]string{"backend", "backend_group"},
 )
 var serverInFlight = promauto.With(metricsRegistry).NewGaugeVec(
 	prometheus.GaugeOpts{
 		Name: "balancer_server_inflight_requests",
 		Help: "Number of in-flight requests to each backend server",
 	},
-	[]string{"backend"},
+	[]string{"backend", "backend_group"},
 )
 
 var serverUtilization = promauto.With(metricsRegistry).NewGaugeVec(
@@ -43,53 +50,46 @@ var serverUtilization = promauto.With(metricsRegistry).NewGaugeVec(
 		Name: "balancer_server_utilization",
 		Help: "Utilization of each backend server",
 	},
-	[]string{"backend"},
+	[]string{"backend", "backend_group"},
 )
 
 type BalancerState struct {
 	host    string
 	port    int
 	cluster []*server.Server
-	current int
 	mu      sync.Mutex
 }
 
-func (b *BalancerState) pickServer() *server.Server {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+func (b *BalancerState) isAboveThreshold(srv *server.Server) bool {
+	if srv == nil {
+		return false
+	}
 
+	return srv.ServerUtilization <= maxServerUtilizationThreshold
+}
+
+func (b *BalancerState) pickOneFiltered(excludeIdx int) (*server.Server, int) {
 	n := len(b.cluster)
-	if n == 0 {
-		return nil
-	}
+	for i := 0; i < filterMaxAttempts; i++ {
+		idx := rand.IntN(n)
+		if idx == excludeIdx {
+			continue
+		}
+		srv := b.cluster[idx]
 
-	maxInflight := int64(0)
-	for _, srv := range b.cluster {
-		if srv.InFlightRequestCount > maxInflight {
-			maxInflight = srv.InFlightRequestCount
+		if b.isAboveThreshold(srv) {
+			return srv, idx
 		}
 	}
 
-	selected := b.cluster[0]
-	if n >= 2 {
-		candidates := rand.Perm(n)[:2]
-		candidate1 := b.cluster[candidates[0]]
-		candidate2 := b.cluster[candidates[1]]
-
-		score1 := b.scoreServer(candidate1, maxInflight)
-		score2 := b.scoreServer(candidate2, maxInflight)
-
-		if score1 < score2 {
-			selected = candidate1
-		} else {
-			selected = candidate2
+	for {
+		idx := rand.IntN(n)
+		if idx != excludeIdx {
+			srv := b.cluster[idx]
+			return srv, idx
 		}
 	}
 
-	selected.InFlightRequestCount++
-	backend := fmt.Sprintf("%s:%d", selected.Host, selected.Port)
-	serverInFlight.WithLabelValues(backend).Set(float64(selected.InFlightRequestCount))
-	return selected
 }
 
 func clamp(val, min, max float64) float64 {
@@ -104,18 +104,56 @@ func clamp(val, min, max float64) float64 {
 	return val
 }
 
-func (b *BalancerState) scoreServer(srv *server.Server, maxInFlight int64) float64 {
+func (b *BalancerState) scoreServer(srv *server.Server) float64 {
+	var normInFlight float64
 
-	// so my idea is to use a simple weighted scoring
-	// to compute scores for each candidate server
-	var normalizedInflight float64
-	if maxInFlight > 0 {
-		normalizedInflight = float64(srv.InFlightRequestCount) / float64(maxInFlight)
+	if srv.MaxConfiguredRequestCount > 0 {
+		// the reason i normalize this by max configured request count
+		// is because consider this scenario:
+		// server a: 8 inflight, max 10
+		// server b: 8 inflight, max 100
+		// if we normalize using max inflight (local view), both servers will have the
+		// same score, but server a is more loaded than server b, so we should prefer server b.
+		normInFlight = float64(srv.InFlightRequestCount) / float64(srv.MaxConfiguredRequestCount)
 	}
 
-	normalizedUtilization := clamp(srv.ServerUtilization, 0, 100) / 100
-	return (inFlightWeight * normalizedInflight) + (serverUtilWeight * normalizedUtilization)
+	normUtilization := clamp(srv.ServerUtilization, 0, 100) / 100
+	normErrorRate := clamp(float64(srv.RollingErrorRate), 0, 1)
 
+	return inFlightRequestCountWeight*normInFlight +
+		serverUtilizationWeight*normUtilization +
+		rollingErrorRateWeight*normErrorRate
+
+}
+
+func (b *BalancerState) pickServer() *server.Server {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	n := len(b.cluster)
+	if n == 0 {
+		return nil
+	}
+
+	selected := b.cluster[0]
+	if n >= 2 {
+		candidate1, idx := b.pickOneFiltered(-1)
+		candidate2, _ := b.pickOneFiltered(idx)
+
+		score1 := b.scoreServer(candidate1)
+		score2 := b.scoreServer(candidate2)
+
+		if score1 < score2 {
+			selected = candidate1
+		} else {
+			selected = candidate2
+		}
+	}
+
+	selected.InFlightRequestCount++
+	backend := fmt.Sprintf("%s:%d", selected.Host, selected.Port)
+	serverInFlight.WithLabelValues(backend, selected.BackendGroup).Set(float64(selected.InFlightRequestCount))
+	return selected
 }
 
 func (b *BalancerState) releaseServer(srv *server.Server) {
@@ -126,7 +164,7 @@ func (b *BalancerState) releaseServer(srv *server.Server) {
 	}
 
 	backend := fmt.Sprintf("%s:%d", srv.Host, srv.Port)
-	serverInFlight.WithLabelValues(backend).Set(float64(srv.InFlightRequestCount))
+	serverInFlight.WithLabelValues(backend, srv.BackendGroup).Set(float64(srv.InFlightRequestCount))
 }
 
 func (b *BalancerState) UpdateServerUtilization(srv *server.Server, utilization float64) {
@@ -135,17 +173,42 @@ func (b *BalancerState) UpdateServerUtilization(srv *server.Server, utilization 
 	srv.ServerUtilization = utilization
 
 	backend := fmt.Sprintf("%s:%d", srv.Host, srv.Port)
-	serverUtilization.WithLabelValues(backend).Set(utilization)
+	serverUtilization.WithLabelValues(backend, srv.BackendGroup).Set(utilization)
 }
 
-func createServer(host string, port int) *server.Server {
+func createServer(host string, port int, backendGroup string, maxRequests int64) *server.Server {
 	return &server.Server{
-		Host:                 host,
-		Port:                 port,
-		ServerUtilization:    0.0,
-		InFlightRequestCount: 0,
-		RollingErrorRate:     0.0,
+		Host:                      host,
+		Port:                      port,
+		BackendGroup:              backendGroup,
+		ServerUtilization:         0.0,
+		InFlightRequestCount:      0,
+		MaxConfiguredRequestCount: maxRequests,
+		RollingErrorRate:          0.0,
 	}
+}
+
+func groupFromTags(tags []string) string {
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, backendGroupTag) {
+			return strings.TrimPrefix(tag, backendGroupTag)
+		}
+	}
+
+	return "unknown"
+}
+
+func maxRequestsFromTags(tags []string) int64 {
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, backendMaxRequestsTag) {
+			v := strings.TrimPrefix(tag, backendMaxRequestsTag)
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+
+	return 0
 }
 
 func createBalancer(host string, port int) *BalancerState {
@@ -153,7 +216,6 @@ func createBalancer(host string, port int) *BalancerState {
 		host:    host,
 		port:    port,
 		cluster: make([]*server.Server, 0),
-		current: 0,
 	}
 }
 
@@ -196,7 +258,9 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 			hostPort := fmt.Sprintf("%s:%d", entry.Service.Address, entry.Service.Port)
 			srv, exists := existing[hostPort]
 			if !exists {
-				srv = createServer(entry.Service.Address, entry.Service.Port)
+				srv = createServer(entry.Service.Address, entry.Service.Port, groupFromTags(entry.Service.Tags), maxRequestsFromTags(entry.Service.Tags))
+			} else if cap := maxRequestsFromTags(entry.Service.Tags); cap > 0 {
+				srv.MaxConfiguredRequestCount = cap
 			}
 
 			newCluster = append(newCluster, srv)
@@ -207,7 +271,7 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 		b.mu.Unlock()
 
 		for _, server := range b.cluster {
-			log.Printf("[balancer]: registered server %s:%d", server.Host, server.Port)
+			log.Printf("[balancer]: registered server %s:%d in group %q", server.Host, server.Port, server.BackendGroup)
 		}
 
 	}
@@ -223,7 +287,7 @@ func (b *BalancerState) routeRequestHandler(w http.ResponseWriter, req *http.Req
 	defer b.releaseServer(selected)
 
 	backend := fmt.Sprintf("%s:%d", selected.Host, selected.Port)
-	requestsTotal.WithLabelValues(backend).Inc()
+	requestsTotal.WithLabelValues(backend, selected.BackendGroup).Inc()
 	err := ForwardRequest(b, selected, w, req)
 	if err != nil {
 		log.Printf("[balancer]: failed to forward request to server %s:%d: %v", selected.Host, selected.Port, err)

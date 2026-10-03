@@ -24,6 +24,7 @@ func GetServerEnv() (*types.ServerEnv, error) {
 	serviceHost := getEnv("SERVICE_HOST", "flux-server-1")
 	servicePort := getEnv("SERVICE_PORT", "8080")
 	maxConfgiuredReqCount := getEnv("MAX_CONFIGURED_REQUEST_COUNT", "100")
+	backendGroup := getEnv("BACKEND_GROUP", "unknown")
 
 	servicePortInt, err := strconv.Atoi(servicePort)
 	if err != nil {
@@ -42,6 +43,7 @@ func GetServerEnv() (*types.ServerEnv, error) {
 		ServiceHost:               serviceHost,
 		ServicePort:               servicePortInt,
 		MaxConfiguredRequestCount: maxConfgiuredReqCountInt,
+		BackendGroup:              backendGroup,
 	}, nil
 
 }

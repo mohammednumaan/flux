@@ -7,6 +7,7 @@ type ServerEnv struct {
 	ServiceHost               string
 	ServicePort               int
 	MaxConfiguredRequestCount int64
+	BackendGroup              string
 }
 
 type BalancerEnv struct {
