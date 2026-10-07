@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	capi "github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/api/watch"
@@ -118,7 +119,10 @@ func (b *BalancerState) scoreServer(srv *server.Server) float64 {
 	}
 
 	normUtilization := clamp(srv.ServerUtilization, 0, 100) / 100
-	normErrorRate := clamp(float64(srv.RollingErrorRate), 0, 1)
+	var normErrorRate float64
+	if srv.RollingErrorRate != nil {
+		normErrorRate = clamp(srv.RollingErrorRate.Rate(), 0, 1)
+	}
 
 	return inFlightRequestCountWeight*normInFlight +
 		serverUtilizationWeight*normUtilization +
@@ -176,6 +180,17 @@ func (b *BalancerState) UpdateServerUtilization(srv *server.Server, utilization 
 	serverUtilization.WithLabelValues(backend, srv.BackendGroup).Set(utilization)
 }
 
+func createRollingErrorRate(timeWindow time.Duration) *server.RollingErrorRate {
+	bucketSize := 1 * time.Second
+	bucketCount := int(timeWindow / bucketSize)
+
+	return &server.RollingErrorRate{
+		TimeWindow: timeWindow,
+		BucketSize: bucketSize,
+		Buckets:    make([]server.ErrorRateBucket, bucketCount),
+	}
+}
+
 func createServer(host string, port int, backendGroup string, maxRequests int64) *server.Server {
 	return &server.Server{
 		Host:                      host,
@@ -184,7 +199,7 @@ func createServer(host string, port int, backendGroup string, maxRequests int64)
 		ServerUtilization:         0.0,
 		InFlightRequestCount:      0,
 		MaxConfiguredRequestCount: maxRequests,
-		RollingErrorRate:          0.0,
+		RollingErrorRate:          createRollingErrorRate(1 * time.Minute),
 	}
 }
 
@@ -288,7 +303,12 @@ func (b *BalancerState) routeRequestHandler(w http.ResponseWriter, req *http.Req
 
 	backend := fmt.Sprintf("%s:%d", selected.Host, selected.Port)
 	requestsTotal.WithLabelValues(backend, selected.BackendGroup).Inc()
-	err := ForwardRequest(b, selected, w, req)
+	statusCode, err := ForwardRequest(b, selected, w, req)
+	failed := err != nil || statusCode >= http.StatusInternalServerError
+	if selected.RollingErrorRate != nil {
+		selected.RollingErrorRate.Record(failed)
+	}
+
 	if err != nil {
 		log.Printf("[balancer]: failed to forward request to server %s:%d: %v", selected.Host, selected.Port, err)
 		http.Error(w, "Failed to forward request", http.StatusInternalServerError)

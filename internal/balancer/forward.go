@@ -12,19 +12,19 @@ import (
 
 const utilizationHeader = "X-Flux-Server-Utilization"
 
-func ForwardRequest(b *BalancerState, s *server.Server, w http.ResponseWriter, r *http.Request) error {
+func ForwardRequest(b *BalancerState, s *server.Server, w http.ResponseWriter, r *http.Request) (int, error) {
 
 	remoteURL := fmt.Sprintf("http://%s:%d%s", s.Host, s.Port, r.URL.Path)
 	req, err := http.NewRequest(r.Method, remoteURL, r.Body)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	req.Header = r.Header.Clone()
 	resp, err := http.DefaultClient.Do(req)
 
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 
@@ -45,9 +45,9 @@ func ForwardRequest(b *BalancerState, s *server.Server, w http.ResponseWriter, r
 	w.WriteHeader(resp.StatusCode)
 	written, err := io.Copy(w, resp.Body)
 	if err != nil {
-		return err
+		return resp.StatusCode, err
 	}
 	log.Printf("[forward]: forwarded request to %s, response status: %d, bytes written: %d", remoteURL, resp.StatusCode, written)
 
-	return nil
+	return resp.StatusCode, nil
 }
