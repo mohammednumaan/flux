@@ -1,17 +1,19 @@
-package server
+package tests
 
 import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/mohammednumaan/flux/internal/types"
 )
 
 func TestRollingErrorRateRateIgnoresExpiredBuckets(t *testing.T) {
 	now := time.Now()
-	r := &RollingErrorRate{
+	r := &types.RollingErrorRate{
 		TimeWindow: time.Minute,
 		BucketSize: time.Second,
-		Buckets: []ErrorRateBucket{
+		Buckets: []types.ErrorRateBucket{
 			{Timestamp: now.Add(-10 * time.Second), Total: 90, Errors: 9},
 			{Timestamp: now.Add(-2 * time.Minute), Total: 100, Errors: 100},
 		},
@@ -26,10 +28,10 @@ func TestRollingErrorRateRateIgnoresExpiredBuckets(t *testing.T) {
 }
 
 func TestRollingErrorRateRecord(t *testing.T) {
-	r := &RollingErrorRate{
+	r := &types.RollingErrorRate{
 		TimeWindow: time.Minute,
 		BucketSize: time.Second,
-		Buckets:    make([]ErrorRateBucket, 60),
+		Buckets:    make([]types.ErrorRateBucket, 60),
 	}
 
 	r.Record(false)
@@ -44,10 +46,10 @@ func TestRollingErrorRateRecord(t *testing.T) {
 }
 
 func TestRollingErrorRateDoesNotCountUnusedBuckets(t *testing.T) {
-	r := &RollingErrorRate{
+	r := &types.RollingErrorRate{
 		TimeWindow: time.Minute,
 		BucketSize: time.Second,
-		Buckets:    make([]ErrorRateBucket, 60),
+		Buckets:    make([]types.ErrorRateBucket, 60),
 	}
 
 	if got := r.Rate(); got != 0 {

@@ -7,12 +7,12 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/mohammednumaan/flux/internal/server"
+	"github.com/mohammednumaan/flux/internal/types"
 )
 
 const utilizationHeader = "X-Flux-Server-Utilization"
 
-func ForwardRequest(b *BalancerState, s *server.Server, w http.ResponseWriter, r *http.Request) (int, error) {
+func ForwardRequest(b *BalancerState, s *types.Server, w http.ResponseWriter, r *http.Request) (int, error) {
 
 	remoteURL := fmt.Sprintf("http://%s:%d%s", s.Host, s.Port, r.URL.Path)
 	req, err := http.NewRequest(r.Method, remoteURL, r.Body)

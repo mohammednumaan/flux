@@ -5,80 +5,54 @@ import (
 	"log"
 	"math/rand/v2"
 	"net/http"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	capi "github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/api/watch"
-	"github.com/mohammednumaan/flux/internal/server"
+	"github.com/mohammednumaan/flux/internal/metrics"
+	"github.com/mohammednumaan/flux/internal/types"
 	"github.com/mohammednumaan/flux/internal/utils"
-
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const (
-	backendGroupTag               = "flux-backend-group="
-	backendMaxRequestsTag         = "flux-max-requests="
-	inFlightRequestCountWeight    = 0.5
-	serverUtilizationWeight       = 0.4
-	rollingErrorRateWeight        = 0.1
+	inFlightRequestCountWeight    = 0.35
+	serverUtilizationWeight       = 0.25
+	rollingErrorRateWeight        = 0.40
 	maxServerUtilizationThreshold = 85.0
+	maxRollingErrorRateThreshold  = 0.5
 	filterMaxAttempts             = 5
-)
-
-var metricsRegistry = prometheus.NewRegistry()
-var requestsTotal = promauto.With(metricsRegistry).NewCounterVec(
-	prometheus.CounterOpts{
-		Name: "balancer_requests_total",
-		Help: "Total number of requests routed by the balancer",
-	},
-	[]string{"backend", "backend_group"},
-)
-var serverInFlight = promauto.With(metricsRegistry).NewGaugeVec(
-	prometheus.GaugeOpts{
-		Name: "balancer_server_inflight_requests",
-		Help: "Number of in-flight requests to each backend server",
-	},
-	[]string{"backend", "backend_group"},
-)
-
-var serverUtilization = promauto.With(metricsRegistry).NewGaugeVec(
-	prometheus.GaugeOpts{
-		Name: "balancer_server_utilization",
-		Help: "Utilization of each backend server",
-	},
-	[]string{"backend", "backend_group"},
 )
 
 type BalancerState struct {
 	host    string
 	port    int
-	cluster []*server.Server
+	cluster []*types.Server
 	mu      sync.Mutex
 }
 
-func (b *BalancerState) isAboveThreshold(srv *server.Server) bool {
-	if srv == nil {
-		return false
+func (b *BalancerState) isAboveThreshold(srv *types.Server) bool {
+	if srv.ServerUtilization > maxServerUtilizationThreshold {
+		return true
 	}
 
-	return srv.ServerUtilization <= maxServerUtilizationThreshold
+	if srv.RollingErrorRate != nil && srv.RollingErrorRate.Rate() > maxRollingErrorRateThreshold {
+		return true
+	}
+
+	return false
 }
 
-func (b *BalancerState) pickOneFiltered(excludeIdx int) (*server.Server, int) {
+func (b *BalancerState) pickOneFiltered(excludeIdx int) (*types.Server, int) {
 	n := len(b.cluster)
 	for i := 0; i < filterMaxAttempts; i++ {
 		idx := rand.IntN(n)
 		if idx == excludeIdx {
 			continue
 		}
-		srv := b.cluster[idx]
 
-		if b.isAboveThreshold(srv) {
+		srv := b.cluster[idx]
+		if !b.isAboveThreshold(srv) {
 			return srv, idx
 		}
 	}
@@ -105,16 +79,10 @@ func clamp(val, min, max float64) float64 {
 	return val
 }
 
-func (b *BalancerState) scoreServer(srv *server.Server) float64 {
+func (b *BalancerState) scoreServer(srv *types.Server) float64 {
 	var normInFlight float64
 
 	if srv.MaxConfiguredRequestCount > 0 {
-		// the reason i normalize this by max configured request count
-		// is because consider this scenario:
-		// server a: 8 inflight, max 10
-		// server b: 8 inflight, max 100
-		// if we normalize using max inflight (local view), both servers will have the
-		// same score, but server a is more loaded than server b, so we should prefer server b.
 		normInFlight = float64(srv.InFlightRequestCount) / float64(srv.MaxConfiguredRequestCount)
 	}
 
@@ -130,7 +98,7 @@ func (b *BalancerState) scoreServer(srv *server.Server) float64 {
 
 }
 
-func (b *BalancerState) pickServer() *server.Server {
+func (b *BalancerState) pickServer() *types.Server {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -156,11 +124,12 @@ func (b *BalancerState) pickServer() *server.Server {
 
 	selected.InFlightRequestCount++
 	backend := fmt.Sprintf("%s:%d", selected.Host, selected.Port)
-	serverInFlight.WithLabelValues(backend, selected.BackendGroup).Set(float64(selected.InFlightRequestCount))
+
+	metrics.Default.RecordInFlight(backend, selected.BackendGroup, float64(selected.InFlightRequestCount))
 	return selected
 }
 
-func (b *BalancerState) releaseServer(srv *server.Server) {
+func (b *BalancerState) releaseServer(srv *types.Server) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if srv.InFlightRequestCount > 0 {
@@ -168,31 +137,31 @@ func (b *BalancerState) releaseServer(srv *server.Server) {
 	}
 
 	backend := fmt.Sprintf("%s:%d", srv.Host, srv.Port)
-	serverInFlight.WithLabelValues(backend, srv.BackendGroup).Set(float64(srv.InFlightRequestCount))
+	metrics.Default.RecordInFlight(backend, srv.BackendGroup, float64(srv.InFlightRequestCount))
 }
 
-func (b *BalancerState) UpdateServerUtilization(srv *server.Server, utilization float64) {
+func (b *BalancerState) UpdateServerUtilization(srv *types.Server, utilization float64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	srv.ServerUtilization = utilization
 
 	backend := fmt.Sprintf("%s:%d", srv.Host, srv.Port)
-	serverUtilization.WithLabelValues(backend, srv.BackendGroup).Set(utilization)
+	metrics.Default.RecordUtilization(backend, srv.BackendGroup, utilization)
 }
 
-func createRollingErrorRate(timeWindow time.Duration) *server.RollingErrorRate {
+func createRollingErrorRate(timeWindow time.Duration) *types.RollingErrorRate {
 	bucketSize := 1 * time.Second
 	bucketCount := int(timeWindow / bucketSize)
 
-	return &server.RollingErrorRate{
+	return &types.RollingErrorRate{
 		TimeWindow: timeWindow,
 		BucketSize: bucketSize,
-		Buckets:    make([]server.ErrorRateBucket, bucketCount),
+		Buckets:    make([]types.ErrorRateBucket, bucketCount),
 	}
 }
 
-func createServer(host string, port int, backendGroup string, maxRequests int64) *server.Server {
-	return &server.Server{
+func createServer(host string, port int, backendGroup string, maxRequests int64) *types.Server {
+	srv := &types.Server{
 		Host:                      host,
 		Port:                      port,
 		BackendGroup:              backendGroup,
@@ -201,36 +170,17 @@ func createServer(host string, port int, backendGroup string, maxRequests int64)
 		MaxConfiguredRequestCount: maxRequests,
 		RollingErrorRate:          createRollingErrorRate(1 * time.Minute),
 	}
-}
 
-func groupFromTags(tags []string) string {
-	for _, tag := range tags {
-		if strings.HasPrefix(tag, backendGroupTag) {
-			return strings.TrimPrefix(tag, backendGroupTag)
-		}
-	}
-
-	return "unknown"
-}
-
-func maxRequestsFromTags(tags []string) int64 {
-	for _, tag := range tags {
-		if strings.HasPrefix(tag, backendMaxRequestsTag) {
-			v := strings.TrimPrefix(tag, backendMaxRequestsTag)
-			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-				return n
-			}
-		}
-	}
-
-	return 0
+	backend := fmt.Sprintf("%s:%d", host, port)
+	metrics.Default.RecordRollingErrorRate(backend, backendGroup, 0)
+	return srv
 }
 
 func createBalancer(host string, port int) *BalancerState {
 	return &BalancerState{
 		host:    host,
 		port:    port,
-		cluster: make([]*server.Server, 0),
+		cluster: make([]*types.Server, 0),
 	}
 }
 
@@ -248,14 +198,14 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 		}
 
 		b.mu.Lock()
-		existing := make(map[string]*server.Server)
+		existing := make(map[string]*types.Server)
 		for _, srv := range b.cluster {
 			hostPort := fmt.Sprintf("%s:%d", srv.Host, srv.Port)
 			existing[hostPort] = srv
 		}
 
 		b.mu.Unlock()
-		newCluster := make([]*server.Server, 0)
+		newCluster := make([]*types.Server, 0)
 		for _, entry := range services {
 			healthy := true
 			for _, check := range entry.Checks {
@@ -273,11 +223,15 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 			hostPort := fmt.Sprintf("%s:%d", entry.Service.Address, entry.Service.Port)
 			srv, exists := existing[hostPort]
 			if !exists {
-				srv = createServer(entry.Service.Address, entry.Service.Port, groupFromTags(entry.Service.Tags), maxRequestsFromTags(entry.Service.Tags))
-			} else if cap := maxRequestsFromTags(entry.Service.Tags); cap > 0 {
-				srv.MaxConfiguredRequestCount = cap
-			}
+				backendGroup := utils.GroupFromTags(entry.Service.Tags)
+				maxRequests := utils.MaxRequestsFromTags(entry.Service.Tags)
 
+				srv = createServer(entry.Service.Address, entry.Service.Port, backendGroup, maxRequests)
+			} else {
+				if cap := utils.MaxRequestsFromTags(entry.Service.Tags); cap != srv.MaxConfiguredRequestCount {
+					srv.MaxConfiguredRequestCount = cap
+				}
+			}
 			newCluster = append(newCluster, srv)
 		}
 
@@ -285,8 +239,19 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 		b.cluster = newCluster
 		b.mu.Unlock()
 
-		for _, server := range b.cluster {
-			log.Printf("[balancer]: registered server %s:%d in group %q", server.Host, server.Port, server.BackendGroup)
+		keep := make(map[string]struct{}, len(newCluster))
+		for _, srv := range newCluster {
+			keep[fmt.Sprintf("%s:%d", srv.Host, srv.Port)] = struct{}{}
+		}
+
+		for hostPort, srv := range existing {
+			if _, ok := keep[hostPort]; !ok {
+				metrics.Default.RecordServerRemoved(hostPort, srv.BackendGroup)
+			}
+		}
+
+		for _, srv := range b.cluster {
+			log.Printf("[balancer]: registered server %s:%d in group %q", srv.Host, srv.Port, srv.BackendGroup)
 		}
 
 	}
@@ -302,11 +267,14 @@ func (b *BalancerState) routeRequestHandler(w http.ResponseWriter, req *http.Req
 	defer b.releaseServer(selected)
 
 	backend := fmt.Sprintf("%s:%d", selected.Host, selected.Port)
-	requestsTotal.WithLabelValues(backend, selected.BackendGroup).Inc()
+	metrics.Default.RecordRequestTotal(backend, selected.BackendGroup)
+
 	statusCode, err := ForwardRequest(b, selected, w, req)
 	failed := err != nil || statusCode >= http.StatusInternalServerError
+
 	if selected.RollingErrorRate != nil {
 		selected.RollingErrorRate.Record(failed)
+		metrics.Default.RecordRollingErrorRate(backend, selected.BackendGroup, selected.RollingErrorRate.Rate())
 	}
 
 	if err != nil {
@@ -330,10 +298,7 @@ func Start() {
 
 		http.Handle(
 			"/metrics",
-			promhttp.HandlerFor(
-				metricsRegistry,
-				promhttp.HandlerOpts{},
-			),
+			metrics.Default.Handler(),
 		)
 		log.Printf("[balancer]: starting balancer at port :%d", balancerEnv.ServicePort)
 		log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", balancerEnv.ServicePort), nil))

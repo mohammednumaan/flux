@@ -9,8 +9,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/mohammednumaan/flux/internal/server"
+	"github.com/mohammednumaan/flux/internal/types"
 )
 
 func createMockServer(host string, port int, handler http.HandlerFunc) *httptest.Server {
@@ -23,7 +24,7 @@ func createMockServer(host string, port int, handler http.HandlerFunc) *httptest
 func TestRouteRequestWithNoServers(t *testing.T) {
 
 	balancer := createBalancer("localhost", 8090)
-	balancer.cluster = []*server.Server{}
+	balancer.cluster = []*types.Server{}
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/api", nil)
@@ -34,41 +35,14 @@ func TestRouteRequestWithNoServers(t *testing.T) {
 	}
 }
 
-func TestGroupFromTags(t *testing.T) {
-	tests := []struct {
-		name string
-		tags []string
-		want string
-	}{
-		{
-			name: "returns the backend group tag",
-			tags: []string{"version=v1", "flux-backend-group=constrained"},
-			want: "constrained",
-		},
-		{
-			name: "returns unknown when the backend group tag is absent",
-			tags: []string{"version=v1"},
-			want: "unknown",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := groupFromTags(tt.tags); got != tt.want {
-				t.Fatalf("groupFromTags(%v) = %q, want %q", tt.tags, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestScoreServerFavorsLowerServerUtilization(t *testing.T) {
 	balancer := createBalancer("localhost", 8090)
-	normal := &server.Server{
+	normal := &types.Server{
 		InFlightRequestCount:      12,
 		MaxConfiguredRequestCount: 100,
 		ServerUtilization:         4,
 	}
-	constrained := &server.Server{
+	constrained := &types.Server{
 		InFlightRequestCount:      9,
 		MaxConfiguredRequestCount: 100,
 		ServerUtilization:         31,
@@ -86,7 +60,7 @@ func TestRouteRequestWithServers(t *testing.T) {
 	const numServers = 3
 	const numRequests = 100
 
-	servers := make([]*server.Server, numServers)
+	servers := make([]*types.Server, numServers)
 	counters := make([]atomic.Int64, numServers)
 
 	for i := 0; i < numServers; i++ {
@@ -99,7 +73,7 @@ func TestRouteRequestWithServers(t *testing.T) {
 
 		u, _ := url.Parse(srv.URL)
 		port, _ := strconv.Atoi(u.Port())
-		servers[i] = &server.Server{
+		servers[i] = &types.Server{
 			Host:                 "localhost",
 			Port:                 port,
 			InFlightRequestCount: 0,
@@ -122,8 +96,8 @@ func TestRouteRequestWithServers(t *testing.T) {
 	wg.Wait()
 
 	totalServersRouted := 0
-	for i, srv := range counters {
-		n := srv.Load()
+	for i := range counters {
+		n := counters[i].Load()
 		t.Logf("Server %d received %d requests", i, n)
 		if n > 0 {
 			totalServersRouted++
@@ -145,7 +119,7 @@ func TestInFlightRequestCount(t *testing.T) {
 	var allRequestsReady sync.WaitGroup
 	allRequestsReady.Add(1)
 
-	servers := make([]*server.Server, numServers)
+	servers := make([]*types.Server, numServers)
 	testServers := make([]*httptest.Server, numServers)
 
 	for i := 0; i < numServers; i++ {
@@ -161,7 +135,7 @@ func TestInFlightRequestCount(t *testing.T) {
 
 		u, _ := url.Parse(srv.URL)
 		port, _ := strconv.Atoi(u.Port())
-		servers[i] = &server.Server{
+		servers[i] = &types.Server{
 			Host: "localhost",
 			Port: port,
 		}
@@ -201,4 +175,54 @@ func TestInFlightRequestCount(t *testing.T) {
 		}
 	}
 
+}
+
+func TestIsAboveThresholdExcludesHighErrorRate(t *testing.T) {
+	balancer := createBalancer("localhost", 8090)
+
+	healthyRate := createRollingErrorRate(1 * time.Minute)
+	for i := 0; i < 10; i++ {
+		healthyRate.Record(false)
+	}
+	healthy := &types.Server{ServerUtilization: 10, RollingErrorRate: healthyRate}
+	if balancer.isAboveThreshold(healthy) {
+		t.Errorf("healthy server (rate=%f) should be eligible", healthyRate.Rate())
+	}
+
+	poisonedRate := createRollingErrorRate(1 * time.Minute)
+	for i := 0; i < 10; i++ {
+		poisonedRate.Record(true)
+	}
+	poisoned := &types.Server{ServerUtilization: 10, RollingErrorRate: poisonedRate}
+	if !balancer.isAboveThreshold(poisoned) {
+		t.Errorf("poisoned server (rate=%f) should be excluded", poisonedRate.Rate())
+	}
+
+	nilRate := &types.Server{ServerUtilization: 10}
+	if balancer.isAboveThreshold(nilRate) {
+		t.Errorf("server with nil error rate and low utilization should be eligible")
+	}
+
+	overloaded := &types.Server{ServerUtilization: 90, RollingErrorRate: healthyRate}
+	if !balancer.isAboveThreshold(overloaded) {
+		t.Errorf("server above utilization threshold should be excluded")
+	}
+}
+
+func TestPickServerFallsBackWhenAllPoisoned(t *testing.T) {
+	balancer := createBalancer("localhost", 8090)
+	for i := 0; i < 3; i++ {
+		rate := createRollingErrorRate(1 * time.Minute)
+		for j := 0; j < 10; j++ {
+			rate.Record(true)
+		}
+		balancer.cluster = append(balancer.cluster, &types.Server{
+			Host: "localhost", Port: 8000 + i,
+			ServerUtilization: 10, RollingErrorRate: rate,
+		})
+	}
+
+	if got := balancer.pickServer(); got == nil {
+		t.Errorf("pickServer should fall back to a server instead of nil when all are poisoned")
+	}
 }

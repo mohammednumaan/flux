@@ -1,0 +1,19 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: HTTPChaos
+metadata:
+  name: flux-backend-fault
+  namespace: flux
+spec:
+  mode: fixed-percent
+  value: "60"
+  selector:
+    namespaces:
+      - flux
+    labelSelectors:
+      app: flux-backend
+  target: Request
+  port: 8080
+  path: /api
+  method: GET
+  abort: true
+  duration: 5m
