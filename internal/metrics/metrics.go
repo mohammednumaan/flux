@@ -14,6 +14,7 @@ type Metrics struct {
 	inFlightRequests  *prometheus.GaugeVec
 	serverUtilization *prometheus.GaugeVec
 	rollingErrorRate  *prometheus.GaugeVec
+	serverProbation   *prometheus.GaugeVec
 }
 
 func New() *Metrics {
@@ -49,6 +50,13 @@ func New() *Metrics {
 			},
 			[]string{"backend", "backend_group"},
 		),
+		serverProbation: promauto.With(registry).NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "balancer_server_in_probation",
+				Help: "1 if backend server is in probation (newly added, limited to 1 inflight), 0 otherwise",
+			},
+			[]string{"backend", "backend_group"},
+		),
 	}
 }
 
@@ -70,10 +78,19 @@ func (m *Metrics) RecordRollingErrorRate(backend, backendGroup string, rate floa
 	m.rollingErrorRate.WithLabelValues(backend, backendGroup).Set(rate)
 }
 
+func (m *Metrics) RecordProbation(backend, backendGroup string, inProbation bool) {
+	val := 0.0
+	if inProbation {
+		val = 1.0
+	}
+	m.serverProbation.WithLabelValues(backend, backendGroup).Set(val)
+}
+
 func (m *Metrics) RecordServerRemoved(backend, backendGroup string) {
 	m.inFlightRequests.DeleteLabelValues(backend, backendGroup)
 	m.serverUtilization.DeleteLabelValues(backend, backendGroup)
 	m.rollingErrorRate.DeleteLabelValues(backend, backendGroup)
+	m.serverProbation.DeleteLabelValues(backend, backendGroup)
 }
 
 func (m *Metrics) Handler() http.Handler {

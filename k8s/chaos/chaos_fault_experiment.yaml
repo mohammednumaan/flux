@@ -11,6 +11,7 @@ spec:
       - flux
     labelSelectors:
       app: flux-backend
+      experiment-group: normal
   target: Request
   port: 8080
   path: /api

@@ -25,10 +25,11 @@ const (
 )
 
 type BalancerState struct {
-	host    string
-	port    int
-	cluster []*types.Server
-	mu      sync.Mutex
+	host        string
+	port        int
+	cluster     []*types.Server
+	inProbation map[string]bool
+	mu          sync.Mutex
 }
 
 func (b *BalancerState) isAboveThreshold(srv *types.Server) bool {
@@ -47,11 +48,18 @@ func (b *BalancerState) pickOneFiltered(excludeIdx int) (*types.Server, int) {
 	n := len(b.cluster)
 	for i := 0; i < filterMaxAttempts; i++ {
 		idx := rand.IntN(n)
+
+		// if a server is in probation and it has 1 inflight request
+		// we don't know if it is healthy until we get a response from it, so i skip it for now
+		srv := b.cluster[idx]
+		hostPort := fmt.Sprintf("%s:%d", srv.Host, srv.Port)
+		if b.inProbation[hostPort] && srv.InFlightRequestCount == 1 {
+			continue
+		}
 		if idx == excludeIdx {
 			continue
 		}
 
-		srv := b.cluster[idx]
 		if !b.isAboveThreshold(srv) {
 			return srv, idx
 		}
@@ -178,9 +186,10 @@ func createServer(host string, port int, backendGroup string, maxRequests int64)
 
 func createBalancer(host string, port int) *BalancerState {
 	return &BalancerState{
-		host:    host,
-		port:    port,
-		cluster: make([]*types.Server, 0),
+		host:        host,
+		port:        port,
+		cluster:     make([]*types.Server, 0),
+		inProbation: make(map[string]bool),
 	}
 }
 
@@ -199,6 +208,7 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 
 		b.mu.Lock()
 		existing := make(map[string]*types.Server)
+
 		for _, srv := range b.cluster {
 			hostPort := fmt.Sprintf("%s:%d", srv.Host, srv.Port)
 			existing[hostPort] = srv
@@ -206,6 +216,7 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 
 		b.mu.Unlock()
 		newCluster := make([]*types.Server, 0)
+
 		for _, entry := range services {
 			healthy := true
 			for _, check := range entry.Checks {
@@ -222,11 +233,17 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 
 			hostPort := fmt.Sprintf("%s:%d", entry.Service.Address, entry.Service.Port)
 			srv, exists := existing[hostPort]
+
 			if !exists {
 				backendGroup := utils.GroupFromTags(entry.Service.Tags)
 				maxRequests := utils.MaxRequestsFromTags(entry.Service.Tags)
-
 				srv = createServer(entry.Service.Address, entry.Service.Port, backendGroup, maxRequests)
+
+				b.mu.Lock()
+				b.inProbation[hostPort] = true
+				b.mu.Unlock()
+				metrics.Default.RecordProbation(hostPort, backendGroup, true)
+
 			} else {
 				if cap := utils.MaxRequestsFromTags(entry.Service.Tags); cap != srv.MaxConfiguredRequestCount {
 					srv.MaxConfiguredRequestCount = cap
@@ -247,13 +264,15 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 		for hostPort, srv := range existing {
 			if _, ok := keep[hostPort]; !ok {
 				metrics.Default.RecordServerRemoved(hostPort, srv.BackendGroup)
+				b.mu.Lock()
+				delete(b.inProbation, hostPort)
+				b.mu.Unlock()
 			}
 		}
 
 		for _, srv := range b.cluster {
 			log.Printf("[balancer]: registered server %s:%d in group %q", srv.Host, srv.Port, srv.BackendGroup)
 		}
-
 	}
 }
 
@@ -282,6 +301,15 @@ func (b *BalancerState) routeRequestHandler(w http.ResponseWriter, req *http.Req
 		http.Error(w, "Failed to forward request", http.StatusInternalServerError)
 		return
 	}
+
+	// if the server was in probation and we successfully received a response
+	// from it, we can remove it from probation and start sending traffic to it
+	b.mu.Lock()
+	if b.inProbation[backend] {
+		delete(b.inProbation, backend)
+		metrics.Default.RecordProbation(backend, selected.BackendGroup, false)
+	}
+	b.mu.Unlock()
 
 }
 
