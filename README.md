@@ -53,7 +53,7 @@ these metrics are labeled by `backend_group`, so the queries below show traffic 
 
 you can see the balancer doing its thing here. as the constrained group gets pushed toward its capacity (utilization climbs to ~82.5%, above the 75% threshold), the balancer filters it out and shifts almost all traffic to the normal group (~91.1% of requests). so the constrained group's in-flight requests stay low and flat.
 
-feel free to configure it however you lik.  change the scoring weights, thresholds, or the backend group capacities and watch how the balancer reroutes traffic in response.
+feel free to configure it however you like.  change the scoring weights, thresholds, or the backend group capacities and watch how the balancer reroutes traffic in response.
 
 ## repo layout
 - `cmd/balancer` — balancer entrypoint
