@@ -48,6 +48,7 @@ func ForwardRequest(b *BalancerState, s *types.Server, w http.ResponseWriter, r 
 	var proxyErr error
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		proxyErr = err
+		w.WriteHeader(http.StatusBadGateway)
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), backendTimeout)

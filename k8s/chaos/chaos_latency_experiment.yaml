@@ -1,0 +1,18 @@
+apiVersion: chaos-mesh.org/v1alpha1
+kind: HTTPChaos
+metadata:
+  name: flux-constrained-latency
+  namespace: flux
+spec:
+  mode: all
+  selector:
+    namespaces:
+      - flux
+    labelSelectors:
+      app: flux-backend
+      experiment-group: constrained
+  target: Request
+  port: 8080
+  path: /api
+  delay: 500ms
+  duration: 5m

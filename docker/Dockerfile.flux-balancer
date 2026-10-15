@@ -5,7 +5,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN  CGO_ENABLED=0 GOOS=linux go build -o /out/flux-balancer ./cmd/balancer.go
+RUN  CGO_ENABLED=0 GOOS=linux go build -o /out/flux-balancer ./cmd/balancer
 
 FROM gcr.io/distroless/static-debian12
 

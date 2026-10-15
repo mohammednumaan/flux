@@ -28,6 +28,11 @@ func healthRequestHandler(w http.ResponseWriter, req *http.Request) {
 
 func withUtilization(key string, state *types.ServerState, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		atomic.AddInt64(&state.InFlightRequestCount, 1)
 		defer atomic.AddInt64(&state.InFlightRequestCount, -1)
 

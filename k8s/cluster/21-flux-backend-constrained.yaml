@@ -38,9 +38,9 @@ spec:
             - name: CONSUL_HTTP_ADDR
               value: "http://consul-server:8500"
             - name: MAX_CONFIGURED_REQUEST_COUNT
-              value: "20"
+              value: "4"
             - name: BACKEND_GROUP
-              value: "new"
+              value: "constrained"
           livenessProbe:
             httpGet:
               path: /health

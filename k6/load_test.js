@@ -1,24 +1,33 @@
 import http from 'k6/http';
 import { check } from 'k6';
+import { Rate, Counter } from 'k6/metrics';
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost:8090';
+const BASE_URL = __ENV.BASE_URL || 'http://10.104.169.72:8090';
+const PATH = '/api';
+
+const successful = new Rate('flux_requests_successful');
+const failed = new Counter('flux_requests_failed');
 
 export const options = {
+    discardResponseBodies: true,
     scenarios: {
-        ramp: {
+        load_ramp: {
             executor: 'ramping-arrival-rate',
             startRate: 100,
             timeUnit: '1s',
             stages: [
-                { target: 200, duration: '2m' },
-                { target: 500, duration: '2m' },
-                { target: 800, duration: '2m' },
-                { target: 800, duration: '5m' },
-                { target: 400, duration: '2m' },
-                { target: 0, duration: '2m' },
+                { target: 250, duration: '1m' },
+                { target: 500, duration: '1m' },
+                { target: 750, duration: '1m' },
+                { target: 1000, duration: '1m' },
+                { target: 1250, duration: '1m' },
+                { target: 1500, duration: '1m' },
+                { target: 1500, duration: '4m' },
+                { target: 0, duration: '5m' },
             ],
-            preAllocatedVUs: 500,
-            maxVUs: 3000,
+            preAllocatedVUs: 800,
+            maxVUs: 4000,
+            gracefulStop: '30s',
         },
     },
     thresholds: {
@@ -28,6 +37,10 @@ export const options = {
 };
 
 export default function() {
-    const res = http.get(`${BASE_URL}/api`, { timeout: '10s' });
-    check(res, { 'status is 200': (r) => r.status === 200 });
+    const res = http.get(`${BASE_URL}${PATH}`, { timeout: '10s' });
+    const ok = check(res, { 'status is 200': (r) => r.status === 200 });
+    successful.add(ok);
+    if (!ok) {
+        failed.add(1);
+    }
 }

@@ -1,1 +1,6 @@
 .git
+results
+results-*.json
+scripts
+docs
+node_modules

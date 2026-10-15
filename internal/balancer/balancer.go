@@ -3,6 +3,7 @@ package balancer
 import (
 	"fmt"
 	"log"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"sync"
@@ -21,6 +22,11 @@ const (
 	rollingErrorRateWeight        = 0.40
 	maxServerUtilizationThreshold = 75.0
 	maxRollingErrorRateThreshold  = 0.5
+
+	// fallback capacity used for scoring when a server does not "expose" a
+	// valid flux-max-requests tag, so it is not treated as having infinite
+	// capacity to handle requests
+	defaultMaxConfiguredRequestCount = 100
 )
 
 type BalancerState struct {
@@ -92,11 +98,14 @@ func clamp(val, min, max float64) float64 {
 func (b *BalancerState) scoreServer(srv *types.Server) float64 {
 	var normInFlight float64
 
-	if srv.MaxConfiguredRequestCount > 0 {
-		normInFlight = float64(srv.InFlightRequestCount) / float64(srv.MaxConfiguredRequestCount)
+	maxConfigured := srv.MaxConfiguredRequestCount
+	if maxConfigured <= 0 {
+		maxConfigured = defaultMaxConfiguredRequestCount
 	}
+	normInFlight = float64(srv.InFlightRequestCount) / float64(maxConfigured)
 
 	normUtilization := clamp(srv.ServerUtilization, 0, 100) / 100
+
 	var normErrorRate float64
 	if srv.RollingErrorRate != nil {
 		normErrorRate = clamp(srv.RollingErrorRate.Rate(), 0, 1)
@@ -153,6 +162,11 @@ func (b *BalancerState) releaseServer(srv *types.Server) {
 }
 
 func (b *BalancerState) UpdateServerUtilization(srv *types.Server, utilization float64) {
+	if math.IsNaN(utilization) || math.IsInf(utilization, 0) || utilization < 0 {
+		log.Printf("[balancer]: ignoring invalid utilization %v reported by server %s:%d", utilization, srv.Host, srv.Port)
+		return
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	srv.ServerUtilization = utilization
@@ -206,7 +220,7 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 
 		services, ok := data.([]*capi.ServiceEntry)
 		if !ok {
-			log.Fatalf("[balancer]: failed to cast data to []*capi.ServiceEntry")
+			log.Printf("[balancer]: failed to cast data to []*capi.ServiceEntry")
 			return
 		}
 
@@ -242,7 +256,7 @@ func balancerWatchHandler(b *BalancerState) func(blockParam watch.BlockingParamV
 				b.inProbation[hostPort] = true
 				metrics.Default.RecordProbation(hostPort, backendGroup, true)
 			} else {
-				if cap := utils.MaxRequestsFromTags(entry.Service.Tags); cap != srv.MaxConfiguredRequestCount {
+				if cap := utils.MaxRequestsFromTags(entry.Service.Tags); cap > 0 && cap != srv.MaxConfiguredRequestCount {
 					srv.MaxConfiguredRequestCount = cap
 				}
 			}
@@ -293,19 +307,21 @@ func (b *BalancerState) routeRequestHandler(w http.ResponseWriter, req *http.Req
 	}
 
 	if err != nil {
+		// ForwardRequest's proxy error handler already wrote a 502 to the client.
 		log.Printf("[balancer]: failed to forward request to server %s:%d: %v", selected.Host, selected.Port, err)
-		http.Error(w, "Failed to forward request", http.StatusInternalServerError)
 		return
 	}
 
 	// if the server was in probation and we successfully received a response
 	// from it, we can remove it from probation and start sending traffic to it
-	b.mu.Lock()
-	if b.inProbation[backend] {
-		delete(b.inProbation, backend)
-		metrics.Default.RecordProbation(backend, selected.BackendGroup, false)
+	if !failed {
+		b.mu.Lock()
+		if b.inProbation[backend] {
+			delete(b.inProbation, backend)
+			metrics.Default.RecordProbation(backend, selected.BackendGroup, false)
+		}
+		b.mu.Unlock()
 	}
-	b.mu.Unlock()
 
 }
 
