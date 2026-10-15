@@ -1,7 +1,8 @@
 # flux
 a netflix-inspired adaptive load balancer written in go.
 
-i built this to understand how real load balancers make decisions under pressure instead of just doing dumb round-robin.
+the design/architecture of this balancer is from netflix's approach to edge load balancing, covered in [rethinking edge load balancing (netflix's blog)](https://netflixtechblog.com/netflix-edge-load-balancing-695308b5548c). if you want the background before diving in, that post is a good place to start.
+
 
 ## how does it work?
 backends register themselves in consul with tags for their group and capacity (`flux-backend-group`, `flux-max-requests`). the balancer watches consul for healthy instances and keeps them in a cluster pool.
