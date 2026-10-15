@@ -16,7 +16,7 @@ import (
 func requestHandler(serviceName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		log.Printf("[server]: received request from %s", req.RemoteAddr)
-		time.Sleep(5 * time.Second)
+		time.Sleep(100 * time.Millisecond)
 		fmt.Fprintf(w, "hello from %s!", serviceName)
 	}
 }

@@ -10,7 +10,7 @@ spec:
   jobLabel: job
   endpoints:
     - port: http 
-      interval: 1s
+      interval: 5s
       path: /metrics
   namespaceSelector:
     matchNames:

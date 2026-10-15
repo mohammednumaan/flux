@@ -1,53 +1,66 @@
 package balancer
 
 import (
+	"context"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"strconv"
+	"time"
 
 	"github.com/mohammednumaan/flux/internal/types"
 )
 
-const utilizationHeader = "X-Flux-Server-Utilization"
+const (
+	utilizationHeader = "X-Flux-Server-Utilization"
+	backendTimeout    = 10 * time.Second
+)
+
+type statusRecorder struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (r *statusRecorder) WriteHeader(statusCode int) {
+	r.statusCode = statusCode
+	r.ResponseWriter.WriteHeader(statusCode)
+}
 
 func ForwardRequest(b *BalancerState, s *types.Server, w http.ResponseWriter, r *http.Request) (int, error) {
-
-	remoteURL := fmt.Sprintf("http://%s:%d%s", s.Host, s.Port, r.URL.Path)
-	req, err := http.NewRequest(r.Method, remoteURL, r.Body)
-	if err != nil {
-		return 0, err
+	target := &url.URL{
+		Scheme: "http",
+		Host:   fmt.Sprintf("%s:%d", s.Host, s.Port),
 	}
 
-	req.Header = r.Header.Clone()
-	resp, err := http.DefaultClient.Do(req)
-
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
-	if utilHeader := resp.Header.Get(utilizationHeader); utilHeader != "" {
-		if u, err := strconv.ParseFloat(utilHeader, 64); err == nil {
-			b.UpdateServerUtilization(s, u)
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		if utilHeader := resp.Header.Get(utilizationHeader); utilHeader != "" {
+			if u, err := strconv.ParseFloat(utilHeader, 64); err == nil {
+				b.UpdateServerUtilization(s, u)
+			}
 		}
+		resp.Header.Del(utilizationHeader)
+		return nil
 	}
 
-	resp.Header.Del(utilizationHeader)
-
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
+	var proxyErr error
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		proxyErr = err
 	}
 
-	w.WriteHeader(resp.StatusCode)
-	written, err := io.Copy(w, resp.Body)
-	if err != nil {
-		return resp.StatusCode, err
-	}
-	log.Printf("[forward]: forwarded request to %s, response status: %d, bytes written: %d", remoteURL, resp.StatusCode, written)
+	ctx, cancel := context.WithTimeout(r.Context(), backendTimeout)
+	defer cancel()
 
-	return resp.StatusCode, nil
+	recorder := &statusRecorder{ResponseWriter: w, statusCode: http.StatusOK}
+	proxy.ServeHTTP(recorder, r.WithContext(ctx))
+
+	remoteURL := target.String() + r.URL.RequestURI()
+	if proxyErr != nil {
+		return recorder.statusCode, proxyErr
+	}
+
+	log.Printf("[forward]: forwarded request to %s, response status: %d", remoteURL, recorder.statusCode)
+	return recorder.statusCode, nil
 }

@@ -7,7 +7,7 @@ metadata:
     app: flux-backend
     experiment-group: normal
 spec:
-  replicas: 5
+  replicas: 10
   selector:
     matchLabels:
       app: flux-backend

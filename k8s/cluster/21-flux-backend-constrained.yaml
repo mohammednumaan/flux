@@ -5,18 +5,18 @@ metadata:
   namespace: flux
   labels:
     app: flux-backend
-    experiment-group: constrained
+    experiment-group: new
 spec:
-  replicas: 5
+  replicas: 10
   selector:
     matchLabels:
       app: flux-backend
-      experiment-group: constrained
+      experiment-group: constrained 
   template:
     metadata:
       labels:
         app: flux-backend
-        experiment-group: constrained
+        experiment-group: constrained 
     spec:
       containers:
         - name: flux-backend-container
@@ -40,7 +40,7 @@ spec:
             - name: MAX_CONFIGURED_REQUEST_COUNT
               value: "20"
             - name: BACKEND_GROUP
-              value: "constrained"
+              value: "new"
           livenessProbe:
             httpGet:
               path: /health

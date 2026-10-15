@@ -87,6 +87,7 @@ func (m *Metrics) RecordProbation(backend, backendGroup string, inProbation bool
 }
 
 func (m *Metrics) RecordServerRemoved(backend, backendGroup string) {
+	m.requestsTotal.DeleteLabelValues(backend, backendGroup)
 	m.inFlightRequests.DeleteLabelValues(backend, backendGroup)
 	m.serverUtilization.DeleteLabelValues(backend, backendGroup)
 	m.rollingErrorRate.DeleteLabelValues(backend, backendGroup)
